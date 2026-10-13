@@ -17,6 +17,7 @@ from sqlalchemy.pool import NullPool
 
 import app.models  # noqa: F401
 from app.api.deps import get_redis
+from app.config import get_settings
 from app.db import Base, get_session
 from app.main import app as fastapi_app
 
@@ -25,6 +26,12 @@ TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL", "postgresql+asyncpg://receita:receita@localhost:5432/receita_test"
 )
 TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
+
+
+@pytest.fixture(autouse=True)
+def development_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Liga o login pelo header X-Dev-User-Id, que fica desligado por padrão."""
+    monkeypatch.setattr(get_settings(), "environment", "development")
 
 
 @pytest.fixture

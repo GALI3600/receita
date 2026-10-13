@@ -61,8 +61,9 @@ Erros sempre no formato `{"error": {"code": "...", "message": "..."}}`; erros de
 também `details`.
 
 **Usuário (temporário, até a fase 3):** com `ENVIRONMENT=development`, o usuário vem do header
-`X-Dev-User-Id` (um UUID qualquer) e é criado na primeira requisição. Em outro ambiente as rotas
-respondem 401.
+`X-Dev-User-Id` (um UUID qualquer) e é criado na primeira requisição. O padrão é `production`, em
+que as rotas respondem 401: o `docker-compose.yml` e o `.env.example` ligam o modo de
+desenvolvimento.
 
 ```bash
 curl -X POST localhost:8000/imports -H "X-Dev-User-Id: $(uuidgen)" \

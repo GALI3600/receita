@@ -10,8 +10,10 @@ varredura periódica de imports parados. O segundo atende só a fila do whisper
 Fluxo de um import: pending → fetching → transcribing → generating → done | failed.
 Sem legenda, o import fica em `transcribing` enquanto o job do whisper (um por vídeo) roda;
 ao terminar, ele reenfileira todos os imports que esperavam aquele vídeo, que seguem para o
-Claude. Um lock por vídeo no Redis garante que só um import por vez processa o mesmo vídeo; os
-outros esperam (o arq reagenda o job) e, quando a receita fica pronta, só copiam.
+Claude. As execuções do whisper são contadas no vídeo: depois de falhas que se repetiriam, novos
+imports dele falham na hora (`pipeline.raise_if_whisper_gave_up`).
+Um lock por vídeo no Redis garante que só um import por vez processa o mesmo vídeo; os outros
+esperam (o arq reagenda o job) e, quando a receita fica pronta, só copiam.
 """
 
 import asyncio
@@ -32,8 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import queue
 from app.config import get_settings
 from app.db import SessionLocal, engine
-from app.errors import ImportTimeoutError, InternalError, PipelineError
-from app.models import ACTIVE_IMPORT_STATUSES, Import, ImportStatus
+from app.errors import ImportTimeoutError, InternalError, PipelineError, YoutubeBlockedError
+from app.models import ACTIVE_IMPORT_STATUSES, Import, ImportStatus, Video
 from app.services import imports, pipeline, transcription
 from app.services.locks import VideoLock
 
@@ -79,8 +81,9 @@ def classify_failure(exc: Exception) -> tuple[PipelineError, bool]:
 async def process_import(ctx: Ctx, import_id: str) -> str:
     settings = get_settings()
     redis: ArqRedis = ctx["redis"]
+    imp_id = uuid.UUID(import_id)
     async with ctx["sessionmaker"]() as session:
-        imp = await session.get(Import, uuid.UUID(import_id))
+        imp = await session.get(Import, imp_id)
         await session.commit()
         if imp is None or imp.status not in ACTIVE_IMPORT_STATUSES:
             return "ignorado"
@@ -95,7 +98,7 @@ async def process_import(ctx: Ctx, import_id: str) -> str:
             async with asyncio.timeout(settings.import_job_timeout_s):
                 return await _run_import(session, redis, imp)
         except Exception as exc:
-            return await _handle_failure(redis, session, imp, exc)
+            return await _handle_failure(redis, session, imp_id, exc)
         finally:
             await lock.release()
 
@@ -120,6 +123,7 @@ async def _run_import(session: AsyncSession, redis: ArqRedis, imp: Import) -> st
                 meta.subtitles, meta.language, meta.duration_s
             )
             if transcript is None:
+                pipeline.raise_if_whisper_gave_up(video)
                 await queue.enqueue_whisper(redis, imp.youtube_id, meta.language)
                 logger.info(
                     "import %s: vídeo %s sem legenda; fila do whisper", imp.id, meta.youtube_id
@@ -149,13 +153,17 @@ async def _join_whisper(session: AsyncSession, redis: ArqRedis, imp: Import) -> 
 
 
 async def _handle_failure(
-    redis: ArqRedis, session: AsyncSession, imp: Import, exc: Exception
+    redis: ArqRedis, session: AsyncSession, import_id: uuid.UUID, exc: Exception
 ) -> str:
+    """Agenda nova tentativa (falha transitória) ou marca o import como falho.
+
+    O rollback vem antes de qualquer acesso ao ORM: se a falha foi num commit (ou o tempo do job
+    acabou no meio de um), a transação está desativada e até ler `imp.id` levantaria
+    `PendingRollbackError`. O import é recarregado depois, porque o rollback expira tudo.
+    """
     settings = get_settings()
-    import_id = imp.id
-    error, transient = classify_failure(exc)
-    # O rollback expira os atributos de `imp`; daqui em diante só `import_id`, até o refresh.
     await session.rollback()
+    error, transient = classify_failure(exc)
 
     if transient:
         key = f"receita:import-retries:{import_id}"
@@ -175,7 +183,9 @@ async def _handle_failure(
         logger.error("import %s falhou com erro inesperado", import_id, exc_info=exc)
     else:
         logger.info("import %s falhou: %r", import_id, error)
-    await session.refresh(imp)
+    imp = await session.get(Import, import_id, populate_existing=True)
+    if imp is None:
+        return "ignorado"
     imports.mark_failed(imp, error)
     await session.commit()
     return f"falhou: {error.code}"
@@ -192,17 +202,34 @@ async def transcribe_whisper(ctx: Ctx, youtube_id: str, language: str | None) ->
             return "ignorado"
         if video.transcript is None:
             try:
+                pipeline.raise_if_whisper_gave_up(video)
+            except PipelineError as error:
+                logger.info("whisper %s: desistindo do vídeo: %r", youtube_id, error)
+                failed = await _fail_whisper_waiters(session, youtube_id, error)
+                return f"falhou: {error.code} ({failed} import(s))"
+            # Conta antes de rodar: um worker que morre no meio (falta de memória, por exemplo)
+            # não chega ao `except`, e o arq repetiria o job sem limite por vídeo.
+            await _update_video(session, youtube_id, whisper_attempts=Video.whisper_attempts + 1)
+            try:
                 async with asyncio.timeout(settings.whisper_job_timeout_s):
                     transcript = await transcription.transcribe_with_whisper(youtube_id, language)
             except Exception as exc:
                 error, transient = classify_failure(exc)
                 await session.rollback()
+                # O bloqueio é do acesso do servidor ao YouTube, não do vídeo: não conta.
+                blocked = isinstance(error, YoutubeBlockedError)
+                if blocked:
+                    await _update_video(
+                        session, youtube_id, whisper_attempts=Video.whisper_attempts - 1
+                    )
                 # Estourar o tempo de novo com o mesmo áudio só gastaria mais CPU.
                 if transient and not isinstance(exc, TimeoutError):
                     if ctx["job_try"] <= settings.import_max_retries:
                         logger.warning("whisper %s: falha transitória %r", youtube_id, error)
                         raise Retry(defer=settings.import_retry_delay_s * ctx["job_try"]) from exc
                 logger.info("whisper %s falhou: %r", youtube_id, error)
+                if not blocked:
+                    await _update_video(session, youtube_id, whisper_error_code=error.code)
                 failed = await _fail_whisper_waiters(session, youtube_id, error)
                 return f"falhou: {error.code} ({failed} import(s))"
             await pipeline.save_transcript(session, video, transcript)
@@ -220,12 +247,21 @@ async def _whisper_waiters(session: AsyncSession, youtube_id: str) -> list[uuid.
     return list(ids)
 
 
+async def _update_video(session: AsyncSession, youtube_id: str, **values: Any) -> None:
+    await session.execute(update(Video).where(Video.youtube_id == youtube_id).values(**values))
+    await session.commit()
+
+
 async def _wake_whisper_waiters(session: AsyncSession, redis: ArqRedis, youtube_id: str) -> int:
     waiting = await _whisper_waiters(session, youtube_id)
     await session.commit()
+    woken = 0
     for import_id in waiting:
-        await queue.enqueue_import(redis, import_id)
-    return len(waiting)
+        if await queue.resume_import(redis, import_id):
+            woken += 1
+        else:
+            logger.warning("import %s: não foi possível retomar depois do whisper", import_id)
+    return woken
 
 
 async def _fail_whisper_waiters(
@@ -271,8 +307,9 @@ async def recover_stale_imports(ctx: Ctx) -> str:
 
 
 async def _has_job(redis: ArqRedis, imp: Import) -> bool:
-    if await queue.job_exists(redis, queue.import_job_id(imp.id)):
-        return True
+    for job_id in (queue.import_job_id(imp.id), queue.resume_job_id(imp.id)):
+        if await queue.job_exists(redis, job_id):
+            return True
     return imp.status is ImportStatus.TRANSCRIBING and await queue.job_exists(
         redis, queue.whisper_job_id(imp.youtube_id)
     )
@@ -301,13 +338,16 @@ _settings = get_settings()
 class WorkerSettings:
     queue_name = queue.DEFAULT_QUEUE
     redis_settings = queue.redis_settings()
+    # Sem resultado guardado em nenhum caminho: o `keep_result` de cada função não vale quando o
+    # arq desiste do job ("max retries exceeded", job expirado), e um `arq:result:<id>` impede
+    # enfileirar o mesmo id (import ou whisper do vídeo) até expirar.
+    keep_result = 0
     functions = [
         func(
             process_import,
             name=queue.PROCESS_IMPORT,
             timeout=_settings.import_job_timeout_s + 60,
             max_tries=PROCESS_IMPORT_MAX_TRIES,
-            keep_result=0,
         )
     ]
     cron_jobs = [
@@ -326,6 +366,7 @@ class WorkerSettings:
 class WhisperWorkerSettings:
     queue_name = queue.WHISPER_QUEUE
     redis_settings = queue.redis_settings()
+    keep_result = 0
     functions = [
         func(
             transcribe_whisper,
@@ -333,7 +374,6 @@ class WhisperWorkerSettings:
             timeout=_settings.whisper_job_timeout_s + 60,
             # Folga para reinícios do worker (o arq conta o cancelamento como tentativa).
             max_tries=_settings.import_max_retries + 3,
-            keep_result=0,
         )
     ]
     on_startup = whisper_startup

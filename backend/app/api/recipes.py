@@ -1,7 +1,7 @@
 import base64
 import binascii
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query, status
@@ -15,6 +15,7 @@ from app.errors import InvalidCursorError, NoOriginalRecipeError, RecipeNotFound
 from app.models import Recipe, User, Video
 from app.schemas.errors import ErrorResponse
 from app.schemas.recipes import RecipeOut, RecipePage, RecipeSummary, RecipeUpdate
+from app.schemas.text import NulFreeStr
 from app.services.imports import recipe_fields
 
 router = APIRouter(prefix="/recipes", tags=["recipes"])
@@ -35,6 +36,11 @@ _SEARCH_DOCUMENT = func.concat_ws(
 )
 MAX_SEARCH_TERMS = 8
 
+# O cursor só carrega o `created_at` de uma receita: datas fora deste intervalo foram forjadas
+# (e as extremas nem cabem no timestamptz que o asyncpg envia).
+_CURSOR_MIN = datetime(2000, 1, 1, tzinfo=UTC)
+_CURSOR_MAX = datetime(2100, 1, 1, tzinfo=UTC)
+
 
 def _escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -54,10 +60,13 @@ def _encode_cursor(recipe: Recipe) -> str:
 def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode()
-        created_at, recipe_id = raw.split("|")
-        return datetime.fromisoformat(created_at), uuid.UUID(recipe_id)
+        raw_created_at, raw_recipe_id = raw.split("|")
+        created_at, recipe_id = datetime.fromisoformat(raw_created_at), uuid.UUID(raw_recipe_id)
     except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
         raise InvalidCursorError(detail=cursor) from exc
+    if created_at.tzinfo is None or not _CURSOR_MIN <= created_at < _CURSOR_MAX:
+        raise InvalidCursorError(detail=cursor)
+    return created_at, recipe_id
 
 
 def _user_recipes(user: User) -> Select[tuple[Recipe]]:
@@ -76,9 +85,10 @@ async def list_recipes(
     user: CurrentUser,
     session: SessionDep,
     q: Annotated[
-        str | None, Query(max_length=200, description="Busca no título, ingredientes e tags")
+        NulFreeStr | None,
+        Query(max_length=200, description="Busca no título, ingredientes e tags"),
     ] = None,
-    tag: Annotated[str | None, Query(max_length=40)] = None,
+    tag: Annotated[NulFreeStr | None, Query(max_length=40)] = None,
     favorite: bool | None = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 24,
     cursor: Annotated[str | None, Query(max_length=200)] = None,

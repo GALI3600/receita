@@ -28,6 +28,10 @@ def import_job_id(import_id: uuid.UUID) -> str:
     return f"import:{import_id}"
 
 
+def resume_job_id(import_id: uuid.UUID) -> str:
+    return f"import:{import_id}:resume"
+
+
 def whisper_job_id(youtube_id: str) -> str:
     return f"whisper:{youtube_id}"
 
@@ -38,6 +42,27 @@ async def enqueue_import(redis: ArqRedis, import_id: uuid.UUID) -> bool:
         PROCESS_IMPORT,
         str(import_id),
         _job_id=import_job_id(import_id),
+        _queue_name=DEFAULT_QUEUE,
+    )
+    return job is not None
+
+
+async def resume_import(redis: ArqRedis, import_id: uuid.UUID) -> bool:
+    """Põe de volta na fila um import que esperava o whisper; False se não conseguiu.
+
+    O arq recusa um id enquanto o job anterior não foi finalizado. Se o job do import ainda está
+    rodando, ele pode ter lido o vídeo antes de a transcrição ser gravada e estar saindo com
+    "aguardando whisper": a retomada vai então com outro id. Se o job só está na fila, nada a
+    fazer, porque quando rodar ele já encontra a transcrição.
+    """
+    if await enqueue_import(redis, import_id):
+        return True
+    if not await redis.exists(in_progress_key_prefix + import_job_id(import_id)):
+        return True
+    job = await redis.enqueue_job(
+        PROCESS_IMPORT,
+        str(import_id),
+        _job_id=resume_job_id(import_id),
         _queue_name=DEFAULT_QUEUE,
     )
     return job is not None

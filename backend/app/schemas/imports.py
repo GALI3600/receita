@@ -1,13 +1,15 @@
 import uuid
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, Field
 
 from app.models import Import, ImportStatus
+from app.schemas.text import NoNul
 
 
 class ImportCreate(BaseModel):
-    url: str = Field(min_length=1, max_length=2048)
+    url: Annotated[str, Field(min_length=1, max_length=2048), NoNul]
 
 
 class ImportFailure(BaseModel):

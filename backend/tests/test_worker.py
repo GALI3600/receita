@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -7,9 +8,11 @@ from typing import Any
 import pytest
 from arq import Retry
 from arq.connections import ArqRedis
-from sqlalchemy import select, update
+from arq.constants import in_progress_key_prefix, job_key_prefix, result_key_prefix
+from arq.worker import create_worker
+from sqlalchemy import event, select, update
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app import queue, worker
 from app.config import get_settings
@@ -19,12 +22,13 @@ from app.errors import (
     LLMUnavailableError,
     NotEmbeddableError,
     TranscriptionFailedError,
+    TranscriptionGaveUpError,
     YoutubeBlockedError,
 )
 from app.models import Import, ImportStatus, Recipe, User, Video
 from app.schemas.recipe_llm import RecipeLLM
 from app.schemas.transcript import Segment, TranscriptSource
-from app.services import recipe_llm, transcription, youtube
+from app.services import pipeline, recipe_llm, transcription, youtube
 from app.services.locks import VideoLock
 from app.services.recipe_llm import PROMPT_VERSION, RecipeGeneration, VideoContext
 from app.services.transcription import Transcript
@@ -121,6 +125,40 @@ def fake(
 @pytest.fixture
 def ctx(redis: ArqRedis, session_factory: async_sessionmaker[AsyncSession]) -> dict[str, Any]:
     return {"redis": redis, "sessionmaker": session_factory, "job_try": 1}
+
+
+@pytest.fixture
+def job_deadlines(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Timeout]:
+    """Prazos (`asyncio.timeout`) dos jobs de import, para vencê-los no ponto exato do teste."""
+    deadlines: list[asyncio.Timeout] = []
+    real_timeout = asyncio.timeout
+    job_timeout_s = get_settings().import_job_timeout_s
+
+    def timeout(delay: float | None) -> asyncio.Timeout:
+        if delay != job_timeout_s:
+            return real_timeout(delay)
+        deadline = real_timeout(None)
+        deadlines.append(deadline)
+        return deadline
+
+    monkeypatch.setattr(asyncio, "timeout", timeout)
+    return deadlines
+
+
+def _expire(deadlines: list[asyncio.Timeout]) -> None:
+    """Vence o prazo do job: o cancelamento chega no próximo `await` da tarefa."""
+    deadlines[-1].reschedule(asyncio.get_running_loop().time())
+
+
+def _on_sql(engine: AsyncEngine, matches: str, action: Callable[[], None]) -> None:
+    """Roda `action` antes de cada comando SQL que começa com `matches`."""
+
+    def before_cursor_execute(*args: Any) -> None:
+        statement: str = args[2]
+        if statement.startswith(matches):
+            action()
+
+    event.listen(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
 
 
 async def _new_import(session: AsyncSession, user: User | None = None) -> Import:
@@ -360,18 +398,95 @@ async def test_unexpected_error_fails_without_retry(
     assert "bug" not in (imp.error_message or "")
 
 
-async def test_job_timeout_is_retried(
+async def test_job_timeout_is_retried_then_fails(
     ctx: dict[str, Any],
     session: AsyncSession,
     fake: FakeServices,
     monkeypatch: pytest.MonkeyPatch,
+    job_deadlines: list[asyncio.Timeout],
 ) -> None:
-    monkeypatch.setattr(get_settings(), "import_job_timeout_s", 0.05)
-    fake.llm_delay_s = 1
+    async def stuck_llm(video: VideoContext, **_: Any) -> RecipeGeneration:
+        fake.calls.append("llm")
+        _expire(job_deadlines)
+        await asyncio.Event().wait()
+        raise AssertionError("não deveria terminar")
+
+    monkeypatch.setattr(recipe_llm, "generate_recipe", stuck_llm)
     imp = await _new_import(session)
+    retries = get_settings().import_max_retries
+
+    for _ in range(retries):
+        with pytest.raises(Retry):
+            await _run(ctx, imp)
+        assert (await _reload(session, imp)).status is ImportStatus.GENERATING
+
+    assert await _run(ctx, imp) == "falhou: import_timeout"
+
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.error_code) == (ImportStatus.FAILED, "import_timeout")
+    assert fake.calls.count("llm") == retries + 1
+
+
+async def test_job_timeout_in_the_middle_of_a_commit_is_retried(
+    ctx: dict[str, Any],
+    session: AsyncSession,
+    fake: FakeServices,
+    db_engine: AsyncEngine,
+    job_deadlines: list[asyncio.Timeout],
+) -> None:
+    imp = await _new_import(session)
+    expired: list[bool] = []
+
+    def expire_once() -> None:
+        if not expired:
+            expired.append(True)
+            _expire(job_deadlines)
+
+    # O prazo vence enquanto o UPDATE do status (FETCHING) espera a resposta do banco.
+    _on_sql(db_engine, "UPDATE imports", expire_once)
 
     with pytest.raises(Retry):
         await _run(ctx, imp)
+
+    assert expired and fake.calls == []
+    assert (await _reload(session, imp)).status is ImportStatus.PENDING
+    assert await _run(ctx, imp) == "concluído"
+
+
+async def test_transient_db_error_on_commit_is_retried_then_fails(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices, db_engine: AsyncEngine
+) -> None:
+    def connection_lost() -> None:
+        raise OperationalError("UPDATE videos", {}, ConnectionError("caiu"))
+
+    # Falha no flush do commit de save_transcript: a transação da sessão fica desativada.
+    _on_sql(db_engine, "UPDATE videos SET transcript", connection_lost)
+    imp = await _new_import(session)
+    retries = get_settings().import_max_retries
+
+    for _ in range(retries):
+        with pytest.raises(Retry):
+            await _run(ctx, imp)
+        assert (await _reload(session, imp)).status is ImportStatus.TRANSCRIBING
+
+    assert await _run(ctx, imp) == "falhou: internal_error"
+
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.error_code) == (ImportStatus.FAILED, "internal_error")
+    assert fake.calls.count("subtitles") == retries + 1
+
+
+async def test_db_error_on_commit_fails_import(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    # Valor que não cabe na coluna: o banco recusa no commit de save_transcript.
+    fake.subtitles = Transcript(SPEECH, "legenda-invalida")  # type: ignore[arg-type]
+    imp = await _new_import(session)
+
+    assert await _run(ctx, imp) == "falhou: internal_error"
+
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.error_code) == (ImportStatus.FAILED, "internal_error")
 
 
 async def test_whisper_failure_fails_waiting_imports(
@@ -400,6 +515,7 @@ async def test_whisper_timeout_is_not_retried(
     ctx: dict[str, Any],
     session: AsyncSession,
     fake: FakeServices,
+    redis: ArqRedis,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake.subtitles = None
@@ -414,9 +530,162 @@ async def test_whisper_timeout_is_not_retried(
     monkeypatch.setattr(get_settings(), "whisper_job_timeout_s", 0.05)
 
     await worker.transcribe_whisper(ctx, YOUTUBE_ID, "pt")
+    await _finish_whisper_job(redis)
 
     imp = await _reload(session, imp)
     assert (imp.status, imp.error_code) == (ImportStatus.FAILED, "import_timeout")
+
+    # Um novo import do mesmo vídeo falha na hora: o whisper estouraria o tempo de novo.
+    again = await _new_import(session)
+    assert await _run(ctx, again) == "falhou: transcription_failed"
+    assert await redis.queued_jobs(queue_name=queue.WHISPER_QUEUE) == []
+
+
+async def _finish_whisper_job(redis: ArqRedis) -> None:
+    """Tira o job do whisper do Redis, como o arq faz quando ele termina."""
+    job_id = queue.whisper_job_id(YOUTUBE_ID)
+    await redis.delete(job_key_prefix + job_id)
+    await redis.zrem(queue.WHISPER_QUEUE, job_id)
+
+
+async def _whisper_until_done(ctx: dict[str, Any]) -> str:
+    """Roda o job do whisper como o arq: de novo a cada Retry, até ele terminar."""
+    for job_try in range(1, 10):
+        try:
+            result = await worker.transcribe_whisper({**ctx, "job_try": job_try}, YOUTUBE_ID, "pt")
+        except Retry:
+            continue
+        await _finish_whisper_job(ctx["redis"])
+        return result
+    raise AssertionError("o job do whisper não terminou")
+
+
+async def _video(session: AsyncSession) -> Video:
+    video = await session.scalar(select(Video).execution_options(populate_existing=True))
+    assert video is not None
+    return video
+
+
+async def test_whisper_attempts_are_limited_per_video(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices, redis: ArqRedis
+) -> None:
+    fake.subtitles = None
+    fake.whisper_error = TranscriptionFailedError(detail="áudio corrompido")
+    first = await _new_import(session)
+    await _run(ctx, first)
+
+    assert await _whisper_until_done(ctx) == "falhou: transcription_failed (1 import(s))"
+    runs = get_settings().import_max_retries + 1
+    assert fake.calls.count("whisper:pt") == runs
+    video = await _video(session)
+    assert (video.whisper_attempts, video.whisper_error_code) == (runs, "transcription_failed")
+
+    # Ainda há tentativas para o vídeo: um novo import volta para o whisper até o limite.
+    second = await _new_import(session)
+    assert await _run(ctx, second) == "na fila do whisper"
+    assert await _whisper_until_done(ctx) == "falhou: transcription_failed (1 import(s))"
+    assert fake.calls.count("whisper:pt") == pipeline.WHISPER_MAX_ATTEMPTS
+
+    # Daqui em diante, o import falha sem entrar na fila do whisper.
+    third = await _new_import(session)
+    assert await _run(ctx, third) == "falhou: transcription_failed"
+    assert await redis.queued_jobs(queue_name=queue.WHISPER_QUEUE) == []
+    assert fake.calls.count("whisper:pt") == pipeline.WHISPER_MAX_ATTEMPTS
+    third = await _reload(session, third)
+    assert third.error_message == TranscriptionGaveUpError.default_message
+
+
+async def test_whisper_run_killed_midway_counts_as_attempt(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    fake.subtitles = None
+    # Worker reiniciado ou morto por falta de memória: o job não chega ao tratamento de erro.
+    fake.whisper_error = asyncio.CancelledError()
+    imp = await _new_import(session)
+    await _run(ctx, imp)
+
+    for _ in range(pipeline.WHISPER_MAX_ATTEMPTS):
+        with pytest.raises(asyncio.CancelledError):
+            await worker.transcribe_whisper(ctx, YOUTUBE_ID, "pt")
+
+    result = await worker.transcribe_whisper(ctx, YOUTUBE_ID, "pt")
+
+    assert result == "falhou: transcription_failed (1 import(s))"
+    assert fake.calls.count("whisper:pt") == pipeline.WHISPER_MAX_ATTEMPTS
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.error_code) == (ImportStatus.FAILED, "transcription_failed")
+
+
+async def test_youtube_block_does_not_count_as_whisper_attempt(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    fake.subtitles = None
+    fake.whisper_error = YoutubeBlockedError()
+    imp = await _new_import(session)
+    await _run(ctx, imp)
+
+    assert await _whisper_until_done(ctx) == "falhou: youtube_blocked (1 import(s))"
+
+    video = await _video(session)
+    assert (video.whisper_attempts, video.whisper_error_code) == (0, None)
+
+
+async def test_waiter_whose_job_is_still_finishing_is_resumed(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices, redis: ArqRedis
+) -> None:
+    fake.subtitles = None
+    first = await _new_import(session)
+    await _run(ctx, first)
+    second = await _new_import(session)
+    await queue.enqueue_import(redis, second.id)
+    # O job de `second` acabou de sair com "aguardando whisper", mas o arq ainda não o
+    # finalizou: o id `import:<id>` continua ocupado.
+    assert await _run(ctx, second) == "aguardando whisper"
+    await redis.set(in_progress_key_prefix + queue.import_job_id(second.id), b"1")
+
+    result = await worker.transcribe_whisper(ctx, YOUTUBE_ID, "pt")
+
+    assert result == "transcrito; 2 import(s) retomado(s)"
+    assert {j.job_id for j in await redis.queued_jobs()} == {
+        f"import:{first.id}",
+        f"import:{second.id}",
+        f"import:{second.id}:resume",
+    }
+    assert await _run(ctx, second) == "concluído"
+
+
+@pytest.mark.parametrize(
+    ("settings", "function", "args", "job_id"),
+    [
+        (worker.WorkerSettings, queue.PROCESS_IMPORT, ("x",), "import:x"),
+        (worker.WhisperWorkerSettings, queue.TRANSCRIBE_WHISPER, (YOUTUBE_ID, "pt"), "whisper:v"),
+    ],
+    ids=["import", "whisper"],
+)
+async def test_job_given_up_by_arq_does_not_block_the_id(
+    redis: ArqRedis, settings: type, function: str, args: tuple[str, ...], job_id: str
+) -> None:
+    arq_worker = create_worker(
+        settings,
+        redis_pool=redis,
+        burst=True,
+        poll_delay=0,
+        handle_signals=False,
+        on_startup=None,
+        on_shutdown=None,
+        cron_jobs=[],
+    )
+    max_tries = next(iter(arq_worker.functions.values())).max_tries
+    assert max_tries is not None
+    await redis.enqueue_job(
+        function, *args, _job_id=job_id, _queue_name=settings.queue_name, _job_try=max_tries + 1
+    )
+
+    await arq_worker.async_run()
+
+    assert arq_worker.jobs_failed == 1
+    assert not await redis.exists(result_key_prefix + job_id)
+    assert await redis.enqueue_job(function, *args, _job_id=job_id, _queue_name=settings.queue_name)
 
 
 async def test_whisper_job_is_idempotent(

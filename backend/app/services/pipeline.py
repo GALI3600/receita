@@ -14,11 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import (
     ErrorCode,
+    ImportTimeoutError,
     LLMInvalidOutputError,
     LLMRefusedError,
     NotARecipeError,
     NoTranscriptError,
     PipelineError,
+    TranscriptionGaveUpError,
     YoutubeBlockedError,
 )
 from app.models import ImportStatus, LLMCall, Video
@@ -38,6 +40,11 @@ LLM_FAILURE_LIMITS: dict[ErrorCode, tuple[type[PipelineError], int]] = {
     ErrorCode.LLM_REFUSED: (LLMRefusedError, 1),
     ErrorCode.LLM_INVALID_OUTPUT: (LLMInvalidOutputError, 2),
 }
+
+# Execuções do whisper por vídeo, somando todos os imports: as tentativas de um job (falhas
+# transitórias) e uma margem para reinícios do worker, que também contam. Estourar o tempo não
+# tem nova chance: com o mesmo áudio, demoraria o mesmo tanto de novo.
+WHISPER_MAX_ATTEMPTS = 4
 
 
 async def process_video(
@@ -207,6 +214,17 @@ async def _raise_if_llm_gave_up(session: AsyncSession, video: Video) -> None:
                 detail=f"{count} falha(s) com o prompt {recipe_llm.PROMPT_VERSION}; "
                 "o Claude não é chamado de novo"
             )
+
+
+def raise_if_whisper_gave_up(video: Video) -> None:
+    """Levanta `TranscriptionGaveUpError` se o vídeo não deve voltar para o whisper."""
+    if video.whisper_error_code == ImportTimeoutError.code:
+        raise TranscriptionGaveUpError(detail="o whisper já estourou o tempo com este vídeo")
+    if video.whisper_attempts >= WHISPER_MAX_ATTEMPTS:
+        raise TranscriptionGaveUpError(
+            detail=f"{video.whisper_attempts} execuções do whisper sem transcrição "
+            f"(último erro: {video.whisper_error_code})"
+        )
 
 
 def _add_llm_call(

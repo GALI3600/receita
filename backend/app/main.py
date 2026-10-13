@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -7,14 +8,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import queue
 from app.api import imports, recipes
+from app.api.deps import DEV_USER_HEADER
 from app.api.errors import register_error_handlers
 from app.config import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    if settings.environment == "development":
+        logger.warning("ENVIRONMENT=development: login pelo header %s ativo", DEV_USER_HEADER)
     app.state.redis = await create_pool(queue.redis_settings())
     try:
         yield

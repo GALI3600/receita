@@ -12,9 +12,14 @@ from pydantic import (
 )
 
 from app.schemas.recipe_llm import Difficulty
+from app.schemas.text import NoNul
 
-ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-OptionalShortText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)] | None
+ShortText = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200), NoNul
+]
+OptionalShortText = (
+    Annotated[str, StringConstraints(strip_whitespace=True, max_length=200), NoNul] | None
+)
 
 MAX_TAGS = 20
 MAX_TAG_CHARS = 40
@@ -36,7 +41,9 @@ class IngredientIn(BaseModel):
 class StepIn(BaseModel):
     """Passo enviado pelo cliente; a ordem é a da lista (`order` recebido é ignorado)."""
 
-    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    text: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000), NoNul
+    ]
     video_timestamp_s: int | None = Field(default=None, ge=0)
 
 
@@ -110,23 +117,35 @@ class RecipeUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: ShortText | None = None
-    summary: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] | None = None
-    servings: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] | None = None
+    summary: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000), NoNul] | None
+    ) = None
+    servings: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=100), NoNul] | None
+    ) = None
     prep_time_min: int | None = Field(default=None, ge=0, le=48 * 60)
     cook_time_min: int | None = Field(default=None, ge=0, le=48 * 60)
     difficulty: Difficulty | None = None
     ingredients: list[IngredientIn] | None = Field(default=None, max_length=100)
     steps: list[StepIn] | None = Field(default=None, max_length=100)
     tips: (
-        list[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]]
+        list[
+            Annotated[
+                str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500), NoNul
+            ]
+        ]
         | None
     ) = Field(default=None, max_length=30)
     tags: (
-        list[Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_TAG_CHARS)]]
+        list[
+            Annotated[
+                str, StringConstraints(strip_whitespace=True, max_length=MAX_TAG_CHARS), NoNul
+            ]
+        ]
         | None
     ) = Field(default=None, max_length=MAX_TAGS)
     is_favorite: bool | None = None
-    user_notes: Annotated[str, StringConstraints(max_length=5000)] | None = None
+    user_notes: Annotated[str, StringConstraints(max_length=5000), NoNul] | None = None
     rating: int | None = Field(default=None, ge=1, le=5)
 
     @field_validator("tags")

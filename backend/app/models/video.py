@@ -24,6 +24,10 @@ class Video(UUIDPrimaryKey, CreatedAt, Base):
     transcript_source: Mapped[TranscriptSource | None] = mapped_column(
         str_enum(TranscriptSource, "transcript_source")
     )
+    # Execuções do whisper iniciadas para este vídeo e o erro da última que falhou: o vídeo não
+    # volta para a fila depois de falhas que se repetiriam (ver pipeline.raise_if_whisper_gave_up).
+    whisper_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    whisper_error_code: Mapped[str | None] = mapped_column(String(50))
 
     generated_recipe: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     llm_model: Mapped[str | None] = mapped_column(String(100))

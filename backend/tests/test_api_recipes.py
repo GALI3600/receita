@@ -1,3 +1,4 @@
+import base64
 import uuid
 from typing import Any
 
@@ -5,7 +6,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.models import Import, Recipe, User
 from tests.factories import GENERATED, headers, make_recipe, make_user, make_video, youtube_id
 
@@ -109,6 +110,12 @@ async def test_dev_header_is_ignored_outside_development(
     assert response.status_code == 401
 
 
+def test_dev_login_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+    assert Settings(_env_file=None).environment != "development"
+
+
 async def test_patch_updates_only_sent_fields(client: AsyncClient, session: AsyncSession) -> None:
     user = await make_user(session)
     recipe = await make_recipe(session, user, await make_video(session))
@@ -174,6 +181,15 @@ async def test_patch_can_clear_rating(client: AsyncClient, session: AsyncSession
         ({"prep_time_min": -1}, "body.prep_time_min"),
         ({"difficulty": "impossível"}, "body.difficulty"),
         ({"video_id": str(uuid.uuid4())}, "body.video_id"),
+        # O Postgres recusa o caractere NUL: sem a validação, viraria erro 500.
+        ({"title": "bolo\x00"}, "body.title"),
+        ({"summary": "\x00"}, "body.summary"),
+        ({"servings": "8\x00"}, "body.servings"),
+        ({"ingredients": [{"name": "ovo", "note": "\x00"}]}, "body.ingredients.0.note"),
+        ({"steps": [{"text": "asse\x00"}]}, "body.steps.0.text"),
+        ({"tips": ["ok", "a\x00b"]}, "body.tips.1"),
+        ({"tags": ["a\x00b"]}, "body.tags.0"),
+        ({"user_notes": "nota\x00"}, "body.user_notes"),
     ],
 )
 async def test_patch_validation(
@@ -369,6 +385,41 @@ async def test_list_invalid_params(client: AsyncClient, session: AsyncSession) -
     response = await client.get("/recipes", headers=headers(user.id), params={"limit": 0})
     assert response.status_code == 422
     assert response.json()["error"]["details"][0]["field"] == "query.limit"
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "0001-01-01T00:00:00+05:00",
+        "9999-12-31T23:59:59-14:00",
+        "1999-12-31T23:59:59+00:00",
+        "2026-10-13T12:00:00",
+    ],
+    ids=["antes-do-ano-1-em-utc", "depois-de-9999-em-utc", "antes-de-2000", "sem-fuso"],
+)
+async def test_forged_cursor_is_rejected(
+    client: AsyncClient, session: AsyncSession, created_at: str
+) -> None:
+    user = await make_user(session)
+    raw = f"{created_at}|{uuid.uuid4()}".encode()
+    cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    response = await client.get("/recipes", headers=headers(user.id), params={"cursor": cursor})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_cursor"
+
+
+@pytest.mark.parametrize("param", ["q", "tag"])
+async def test_list_rejects_nul_char(
+    client: AsyncClient, session: AsyncSession, param: str
+) -> None:
+    user = await make_user(session)
+
+    response = await client.get("/recipes", headers=headers(user.id), params={param: "a\x00b"})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["field"] == f"query.{param}"
 
 
 async def test_unknown_route_uses_error_format(client: AsyncClient) -> None:

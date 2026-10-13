@@ -131,6 +131,15 @@ class TranscriptionFailedError(PipelineError):
     )
 
 
+class TranscriptionGaveUpError(TranscriptionFailedError):
+    """O whisper já falhou demais com este vídeo; ele não volta para a fila."""
+
+    transient = False
+    default_message = (
+        "Não conseguimos transcrever o áudio desse vídeo. Tente outro vídeo com a mesma receita."
+    )
+
+
 class NotARecipeError(PipelineError):
     code = ErrorCode.NOT_A_RECIPE
     default_message = "Esse vídeo não parece ser uma receita."

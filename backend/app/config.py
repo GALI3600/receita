@@ -8,7 +8,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    environment: str = "development"
+    # Fechado por padrão: o login de desenvolvimento (X-Dev-User-Id) só vale com
+    # ENVIRONMENT=development explícito (docker-compose e .env.example).
+    environment: str = "production"
     database_url: str = "postgresql+asyncpg://receita:receita@localhost:5432/receita"
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: list[str] = ["http://localhost:5173"]

@@ -77,6 +77,22 @@ async def test_missing_url_is_a_validation_error(
     assert response.json()["error"]["details"][0]["field"] == "body.url"
 
 
+async def test_url_with_nul_char_is_a_validation_error(
+    client: AsyncClient, session: AsyncSession, redis: ArqRedis
+) -> None:
+    user = await make_user(session)
+
+    # O id extraído é válido; o NUL só quebraria na gravação de `Import.url`.
+    response = await client.post(
+        "/imports", headers=headers(user.id), json={"url": "https://youtu.be/abcdefghijk?si=a\x00b"}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["field"] == "body.url"
+    assert await _queued(redis) == []
+    assert await session.scalar(select(func.count()).select_from(Import)) == 0
+
+
 async def test_recipe_already_in_book_returns_it(
     client: AsyncClient, session: AsyncSession, redis: ArqRedis
 ) -> None:
