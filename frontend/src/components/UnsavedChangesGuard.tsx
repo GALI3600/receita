@@ -10,9 +10,12 @@ import { ConfirmDialog } from './ConfirmDialog'
 export function UnsavedChangesGuard({
   when,
   message = 'As alterações que você fez ainda não foram salvas.',
+  onLeave,
 }: {
   when: boolean
   message?: string
+  /** A pessoa confirmou que quer sair sem salvar. */
+  onLeave?: () => void
 }) {
   // Só bloqueia quando o caminho muda (trocar a query string da mesma página não perde nada).
   const blocker = useBlocker(
@@ -38,7 +41,10 @@ export function UnsavedChangesGuard({
       confirmLabel="Sair sem salvar"
       cancelLabel="Continuar editando"
       tone="danger"
-      onConfirm={() => blocker.proceed?.()}
+      onConfirm={() => {
+        onLeave?.()
+        blocker.proceed?.()
+      }}
       onCancel={() => blocker.reset?.()}
     >
       {message}

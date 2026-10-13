@@ -20,6 +20,8 @@ docker run --rm --network host --ipc=host \
 - `journey.spec.ts` e `review.spec.ts`: jornada principal e regressões da fase 4;
 - `phase5.spec.ts`: edição e restauração, notas, avaliação, porções, marcações, filtros na URL,
   impressão, exportar e excluir a conta;
+- `review5.spec.ts`: regressões da revisão da fase 5 (sessão expirada no meio da edição, foco
+  atrás da barra fixa, diálogos centralizados, menu do celular, impressão, limites da busca);
 - `a11y.spec.ts`: axe-core (WCAG 2.1 A/AA) nas páginas principais, tema claro e escuro, 360px e
   1280px;
 - `screenshots.spec.ts`: capturas de tela (360px e 1280px, inclusive impressão em PNG/PDF A4 e

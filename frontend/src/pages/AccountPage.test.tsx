@@ -59,6 +59,24 @@ describe('AccountPage', () => {
     expect(logout?.headers.get('X-Requested-With')).toBeTruthy()
   })
 
+  it('sair da conta apaga as marcações e os rascunhos guardados neste navegador', async () => {
+    window.localStorage.setItem('receita:marcados:rec-1', '["0:farinha"]')
+    window.localStorage.setItem('outra-coisa', 'fica')
+    window.sessionStorage.setItem('receita:rascunho:rec-1', '{}')
+    window.sessionStorage.setItem('receita:nota:rec-1', '{}')
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'POST /api/auth/logout': () => new Response(null, { status: 204 }),
+    })
+    renderApp(routes, { route: '/conta' })
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Sair da conta' }))
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/$/))
+    expect(window.localStorage.getItem('receita:marcados:rec-1')).toBeNull()
+    expect(window.localStorage.getItem('outra-coisa')).toBe('fica')
+    expect(window.sessionStorage.length).toBe(0)
+  })
+
   it('se o logout falhar, a sessão continua e o erro aparece', async () => {
     mockApi({
       'GET /api/auth/me': () => json(200, makeMe()),

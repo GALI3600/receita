@@ -119,9 +119,10 @@
     inset: -4px 0;
   }
 
-  /* Diálogo de confirmação: uma folha sobre a página escurecida. */
+  /* Diálogo de confirmação: uma folha sobre a página escurecida, sempre no centro da tela (a margem
+     com !important: utilitários do pai, como space-y, não podem empurrá-la para o topo). */
   .dialog-sheet {
-    @apply m-auto w-[min(32rem,calc(100vw-2rem))] rounded-lg border border-line bg-card px-6 py-6 text-ink shadow-page;
+    @apply m-auto! w-[min(32rem,calc(100vw-2rem))] rounded-lg border border-line bg-card px-6 py-6 text-ink shadow-page;
     animation: dialog-in 180ms ease-out;
   }
   .dialog-sheet::backdrop {
@@ -251,6 +252,19 @@
   }
 }
 
+/* Desktop: a lista de ingredientes cortada pela altura da tela esmaece no fim (há mais abaixo). */
+@media screen and (min-width: 1024px) {
+  .recipe-ingredients[data-more-below='true'] {
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 3.5rem), transparent);
+  }
+}
+
+/* Edição: a barra fixa de ações (Cancelar/Salvar) também não pode cobrir o campo com foco. A
+   altura dela vem do editor (ResizeObserver), com folga para o anel de foco. */
+html:has(.editor-actions) {
+  scroll-padding-bottom: calc(var(--editor-actions-height, 8rem) + 1rem);
+}
+
 @media print {
   @page {
     margin: 14mm 14mm 16mm;
@@ -292,8 +306,18 @@
   label:hover {
     background: transparent !important;
   }
-  /* Caixas vazias para ir marcando no papel. */
+  /* Caixas vazias para ir marcando no papel: o que foi marcado na tela sai sem marca e sem
+     risco (unlayered, vence os utilitários de .line-through e .text-ink-soft). */
   .ingredient-check {
-    accent-color: #000;
+    appearance: none;
+    width: 0.95rem;
+    height: 0.95rem;
+    border: 1.5px solid #000;
+    border-radius: 2px;
+    background: none;
+  }
+  .ingredient-check + span {
+    text-decoration: none;
+    color: inherit;
   }
 }

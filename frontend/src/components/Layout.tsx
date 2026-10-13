@@ -74,7 +74,15 @@ function MainNav() {
   }, [open])
 
   return (
-    <nav aria-label="Principal">
+    <nav
+      aria-label="Principal"
+      onBlur={(event) => {
+        // O foco saiu do menu (Tab depois do último link): fecha, senão o painel aberto cobriria
+        // o elemento que acabou de receber o foco.
+        const next = event.relatedTarget
+        if (open && next instanceof Node && !event.currentTarget.contains(next)) setOpen(false)
+      }}
+    >
       <ul className="hidden items-center gap-1 sm:flex">
         {MAIN_LINKS.map((link) => (
           <li key={link.to}>

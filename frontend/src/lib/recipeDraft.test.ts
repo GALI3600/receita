@@ -157,6 +157,21 @@ describe('validateDraft', () => {
   })
 })
 
+describe('limites contados como o backend (code points)', () => {
+  it('emoji conta um caractere, não dois', () => {
+    const base = draft()
+    const title = '🍫'.repeat(150)
+    expect(title.length).toBe(300)
+    const ok = validateDraft({ ...base, title, tags: ['🍰'.repeat(40)] })
+    expect(ok.errors).toEqual({})
+    expect(ok.payload?.body.title).toBe(title)
+
+    const tooLong = validateDraft({ ...base, title: '🍫'.repeat(201), tags: ['🍰'.repeat(41)] })
+    expect(tooLong.errors.title).toBe('Use no máximo 200 caracteres.')
+    expect(tooLong.errors['tags.0']).toBe('Use no máximo 40 caracteres.')
+  })
+})
+
 describe('erros do servidor', () => {
   it('traduz as mensagens do Pydantic', () => {
     expect(

@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 
@@ -59,6 +59,23 @@ describe('Layout: menu do celular', () => {
     expect(links[0]).toHaveAttribute('aria-current', 'page')
     await userEvent.click(links[2])
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/conta'))
+    expect(button).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('fecha quando o foco sai do menu (Tab depois do último link)', async () => {
+    mockApi({ 'GET /api/auth/me': () => json(200, makeMe()) })
+    renderLayout()
+
+    const button = await screen.findByRole('button', { name: 'Menu' })
+    await userEvent.click(button)
+    const panel = document.getElementById('menu-celular')!
+    const links = panel.querySelectorAll('a')
+    act(() => links[2].focus())
+    expect(panel).toBeVisible()
+
+    // O foco vai para fora do <nav> (o próximo elemento da página).
+    act(() => screen.getByText('Pular para o conteúdo').focus())
+    expect(panel).not.toBeVisible()
     expect(button).toHaveAttribute('aria-expanded', 'false')
   })
 })

@@ -93,10 +93,9 @@ describe('RecipePage', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Favoritar' }))
 
-    expect(await screen.findByRole('button', { name: 'Favorita' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
+    expect(
+      await screen.findByRole('button', { name: 'Favorita: tirar dos favoritos' }),
+    ).toBeInTheDocument()
     const patch = calls.find((call) => call.method === 'PATCH')
     expect(patch?.body).toEqual({ is_favorite: true })
     expect(patch?.headers.get('X-Requested-With')).toBeTruthy()
@@ -133,6 +132,8 @@ describe('RecipePage', () => {
     expect(
       await screen.findByRole('heading', { name: 'Receita não encontrada' }),
     ).toBeInTheDocument()
+    // O título da aba diz o que aconteceu (e não "Receita · Receita").
+    await waitFor(() => expect(document.title).toBe('Receita não encontrada · Receita'))
   })
 
   it('grupo de ingredientes com espaço no nome tem nome acessível', async () => {

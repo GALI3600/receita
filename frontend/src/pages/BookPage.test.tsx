@@ -145,6 +145,54 @@ describe('BookPage', () => {
     )
   })
 
+  it('livro vazio esconde a busca e os filtros (não há o que filtrar)', async () => {
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes': () => json(200, { items: [], next_cursor: null }),
+      'GET /api/recipes/tags': () => json(200, { tags: [] }),
+    })
+    renderBook('/livro')
+    await screen.findByRole('heading', { name: 'Seu livro ainda está em branco' })
+    expect(screen.queryByRole('search')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Buscar')).not.toBeInTheDocument()
+  })
+
+  it('busca e tag maiores que os limites da API não viram erro', async () => {
+    const { calls } = mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes': () => json(200, { items: [], next_cursor: null }),
+      'GET /api/recipes/tags': () => json(200, { tags: [] }),
+    })
+    renderBook(`/livro?q=${'a'.repeat(250)}&tag=${'b'.repeat(41)}`)
+
+    const search = await screen.findByLabelText('Buscar')
+    expect(search).toHaveAttribute('maxLength', '200')
+    expect(search).toHaveValue('a'.repeat(200))
+    await waitFor(() => expect(calls.some((call) => call.path === '/api/recipes')).toBe(true))
+    const list = calls.filter((call) => call.path === '/api/recipes')
+    for (const call of list) {
+      expect(call.query.get('q')).toBe('a'.repeat(200))
+      expect(call.query.get('tag')).toBeNull()
+    }
+  })
+
+  it('no celular, poucas tags à vista; as outras em "Mais"', async () => {
+    const tags = Array.from({ length: 10 }, (_, i) => ({ name: `tag${i}`, count: 1 }))
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes': () => json(200, { items: [makeRecipe({ tags: [] })], next_cursor: null }),
+      'GET /api/recipes/tags': () => json(200, { tags }),
+    })
+    renderBook('/livro')
+
+    // jsdom: matchMedia não casa com (min-width: 640px), como num celular.
+    const group = await screen.findByRole('group', { name: 'Tags' })
+    await waitFor(() => expect(within(group).getByRole('button', { name: '#tag0' })).toBeVisible())
+    expect(within(group).queryByRole('button', { name: '#tag9' })).not.toBeInTheDocument()
+    await userEvent.click(within(group).getByRole('button', { name: /^Mais \d+ tags$/ }))
+    expect(within(group).getByRole('button', { name: '#tag9' })).toBeInTheDocument()
+  })
+
   it('mostra esqueletos enquanto carrega', async () => {
     mockApi({
       'GET /api/auth/me': () => json(200, makeMe()),

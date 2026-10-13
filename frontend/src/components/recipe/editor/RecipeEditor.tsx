@@ -1,4 +1,4 @@
-import { useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 
 import { isApiError } from '../../../api/client'
 import { useUpdateRecipe } from '../../../api/queries'
@@ -14,8 +14,12 @@ import {
   type DraftErrors,
   type RecipeDraft,
 } from '../../../lib/recipeDraft'
+import { charCount } from '../../../lib/text'
+import { clearRecipeDraft, saveRecipeDraft } from '../../../lib/unsavedDrafts'
+import { useSession } from '../../../session/context'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { UnsavedChangesGuard } from '../../UnsavedChangesGuard'
+import { Alert } from '../../ui'
 import { SelectField, TextArea, TextInput } from './fields'
 import { fieldId, focusField } from './formUtils'
 import { IngredientsEditor, StepsEditor, TagsEditor, TipsEditor } from './ListEditors'
@@ -96,21 +100,56 @@ function Section({ title, id, children }: { title: string; id: string; children:
 
 interface RecipeEditorProps {
   recipe: Recipe
+  /** Alterações não salvas recuperadas (a sessão tinha expirado no meio da edição). */
+  restored?: RecipeDraft | null
   /** Fecha o editor; `saved` diz se as alterações foram gravadas. */
   onClose: (saved: boolean) => void
 }
 
 /** Modo de edição da receita: todos os campos, com validação e aviso ao sair sem salvar. */
-export function RecipeEditor({ recipe, onClose }: RecipeEditorProps) {
+export function RecipeEditor({ recipe, restored = null, onClose }: RecipeEditorProps) {
+  const userId = useSession().user?.id
   const [initial] = useState(() => toDraft(recipe))
-  const [draft, setDraft] = useState(initial)
+  const [draft, setDraft] = useState(() => restored ?? initial)
   const [errors, setErrors] = useState<DraftErrors>({})
   const [announcement, setAnnouncement] = useState('')
   const [confirmingCancel, setConfirmingCancel] = useState(false)
   const update = useUpdateRecipe(recipe.id)
   const summaryRef = useRef<HTMLDivElement>(null)
+  const actionsRef = useRef<HTMLDivElement>(null)
   const dirty = isDraftDirty(initial, draft)
   const errorKeys = orderedErrorKeys(errors)
+
+  // O rascunho fica guardado na aba enquanto há o que salvar: se a sessão expirar (o 401 troca a
+  // página pelo login e desmonta o editor), a receita reabre com ele depois de entrar de novo.
+  useEffect(() => {
+    if (!userId) return
+    if (dirty && !update.isSuccess) saveRecipeDraft(userId, recipe.id, draft)
+    else clearRecipeDraft(recipe.id)
+  }, [draft, dirty, update.isSuccess, userId, recipe.id])
+
+  // A altura da barra fixa de ações vira o scroll-padding-bottom da página (index.css): o campo
+  // que recebe o foco pelo teclado nunca fica escondido atrás dela (no celular ela quebra linha).
+  useEffect(() => {
+    const bar = actionsRef.current
+    const root = document.documentElement
+    if (!bar) return
+    const measure = () =>
+      root.style.setProperty('--editor-actions-height', `${bar.getBoundingClientRect().height}px`)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(bar)
+    return () => {
+      observer.disconnect()
+      root.style.removeProperty('--editor-actions-height')
+    }
+  }, [])
+
+  function close(saved: boolean) {
+    clearRecipeDraft(recipe.id)
+    onClose(saved)
+  }
 
   function change(patch: Partial<RecipeDraft>) {
     setDraft((current) => ({ ...current, ...patch }))
@@ -139,7 +178,7 @@ export function RecipeEditor({ recipe, onClose }: RecipeEditorProps) {
     }
     setErrors({})
     update.mutate(payload.body, {
-      onSuccess: () => onClose(true),
+      onSuccess: () => close(true),
       onError: (error) => {
         if (isApiError(error) && error.status === 422 && error.details?.length) {
           showErrors(serverErrorsToDraft(error.details, payload))
@@ -152,17 +191,16 @@ export function RecipeEditor({ recipe, onClose }: RecipeEditorProps) {
 
   function onCancel() {
     if (dirty) setConfirmingCancel(true)
-    else onClose(false)
+    else close(false)
   }
 
   return (
-    <form
-      onSubmit={onSubmit}
-      noValidate
-      aria-labelledby="editar-titulo-pagina"
-      className="space-y-8"
-    >
-      <UnsavedChangesGuard when={dirty && !update.isSuccess} />
+    <>
+      {/* Diálogos e anúncios fora do <form>: o space-y dele mexeria na margem do <dialog>. */}
+      <UnsavedChangesGuard
+        when={dirty && !update.isSuccess}
+        onLeave={() => clearRecipeDraft(recipe.id)}
+      />
       <ConfirmDialog
         open={confirmingCancel}
         title="Descartar as alterações?"
@@ -171,7 +209,7 @@ export function RecipeEditor({ recipe, onClose }: RecipeEditorProps) {
         tone="danger"
         onConfirm={() => {
           setConfirmingCancel(false)
-          onClose(false)
+          close(false)
         }}
         onCancel={() => setConfirmingCancel(false)}
       >
@@ -181,173 +219,189 @@ export function RecipeEditor({ recipe, onClose }: RecipeEditorProps) {
         {announcement}
       </p>
 
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <p className="eyebrow">Editando</p>
-          <h1 id="editar-titulo-pagina" className="mt-1 text-3xl font-semibold sm:text-4xl">
-            {recipe.title}
-          </h1>
+      <form
+        onSubmit={onSubmit}
+        noValidate
+        aria-labelledby="editar-titulo-pagina"
+        className="space-y-8"
+      >
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <p className="eyebrow">Editando</p>
+            <h1 id="editar-titulo-pagina" className="mt-1 text-3xl font-semibold sm:text-4xl">
+              {recipe.title}
+            </h1>
+          </div>
         </div>
-      </div>
 
-      {errorKeys.length > 0 && (
-        <div
-          ref={summaryRef}
-          id="editar-resumo-erros"
-          tabIndex={-1}
-          role="alert"
-          className="rounded-lg border border-danger/40 bg-danger-tint px-4 py-3"
-        >
-          <p className="font-semibold">
-            {errorKeys.length === 1
-              ? 'Falta corrigir um campo antes de salvar:'
-              : `Falta corrigir ${errorKeys.length} campos antes de salvar:`}
-          </p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-5">
-            {errorKeys.map((key) => (
-              <li key={key}>
-                {key === 'form' ? (
-                  errors[key]
-                ) : (
-                  <a
-                    href={`#${errorTarget(key)}`}
-                    className="link font-normal"
-                    onClick={(event) => {
-                      event.preventDefault()
-                      focusField(errorTarget(key))
-                    }}
-                  >
-                    {errorLabel(key, draft)}: {errors[key]}
-                  </a>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+        {restored && (
+          <Alert tone="warning" title="Recuperamos as alterações que você não tinha salvado.">
+            Confira e clique em “Salvar alterações”, ou em “Cancelar” para descartá-las.
+          </Alert>
+        )}
 
-      <section aria-labelledby="editar-sobre" className="space-y-4">
-        <h2 id="editar-sobre" className="sr-only">
-          Sobre a receita
-        </h2>
-        <TextInput
-          fieldKey="title"
-          label="Título"
-          value={draft.title}
-          error={errors.title}
-          onChange={(e) => change({ title: e.target.value })}
-          autoComplete="off"
-          className="max-w-3xl"
-        />
-        <TextArea
-          fieldKey="summary"
-          label="Resumo"
-          value={draft.summary}
-          error={errors.summary}
-          onChange={(e) => change({ summary: e.target.value })}
-          hint={`${draft.summary.trim().length} de ${LIMITS.summary} caracteres.`}
-          className="max-w-3xl"
-        />
-        <div className="grid max-w-3xl gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <TextInput
-            fieldKey="servings"
-            label="Rendimento"
-            value={draft.servings}
-            error={errors.servings}
-            onChange={(e) => change({ servings: e.target.value })}
-            placeholder="6 porções"
-            hint="Com um número, dá para ajustar as porções."
-            autoComplete="off"
-            className="sm:col-span-2 lg:col-span-1"
-          />
-          <TextInput
-            fieldKey="prepTime"
-            label="Preparo (min)"
-            value={draft.prepTime}
-            error={errors.prepTime}
-            onChange={(e) => change({ prepTime: e.target.value })}
-            inputMode="numeric"
-            autoComplete="off"
-          />
-          <TextInput
-            fieldKey="cookTime"
-            label="Forno/fogo (min)"
-            value={draft.cookTime}
-            error={errors.cookTime}
-            onChange={(e) => change({ cookTime: e.target.value })}
-            inputMode="numeric"
-            autoComplete="off"
-          />
-          <SelectField
-            fieldKey="difficulty"
-            label="Dificuldade"
-            value={draft.difficulty}
-            error={errors.difficulty}
-            onChange={(e) => change({ difficulty: e.target.value as RecipeDraft['difficulty'] })}
+        {errorKeys.length > 0 && (
+          <div
+            ref={summaryRef}
+            id="editar-resumo-erros"
+            tabIndex={-1}
+            role="alert"
+            className="rounded-lg border border-danger/40 bg-danger-tint px-4 py-3"
           >
-            <option value="">Não informada</option>
-            {DIFFICULTIES.map((difficulty) => (
-              <option key={difficulty} value={difficulty}>
-                {difficulty[0].toUpperCase() + difficulty.slice(1)}
-              </option>
-            ))}
-          </SelectField>
-        </div>
-      </section>
+            <p className="font-semibold">
+              {errorKeys.length === 1
+                ? 'Falta corrigir um campo antes de salvar:'
+                : `Falta corrigir ${errorKeys.length} campos antes de salvar:`}
+            </p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5">
+              {errorKeys.map((key) => (
+                <li key={key}>
+                  {key === 'form' ? (
+                    errors[key]
+                  ) : (
+                    <a
+                      href={`#${errorTarget(key)}`}
+                      className="link font-normal"
+                      onClick={(event) => {
+                        event.preventDefault()
+                        focusField(errorTarget(key))
+                      }}
+                    >
+                      {errorLabel(key, draft)}: {errors[key]}
+                    </a>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
-      <Section title="Ingredientes" id="editar-ingredientes">
-        <IngredientsEditor
-          items={draft.ingredients}
-          errors={errors}
-          onChange={(ingredients) => change({ ingredients })}
-          announce={announce}
-        />
-      </Section>
+        <section aria-labelledby="editar-sobre" className="space-y-4">
+          <h2 id="editar-sobre" className="sr-only">
+            Sobre a receita
+          </h2>
+          <TextInput
+            fieldKey="title"
+            label="Título"
+            value={draft.title}
+            error={errors.title}
+            onChange={(e) => change({ title: e.target.value })}
+            autoComplete="off"
+            className="max-w-3xl"
+          />
+          <TextArea
+            fieldKey="summary"
+            label="Resumo"
+            value={draft.summary}
+            error={errors.summary}
+            onChange={(e) => change({ summary: e.target.value })}
+            hint={`${charCount(draft.summary.trim())} de ${LIMITS.summary} caracteres.`}
+            className="max-w-3xl"
+          />
+          <div className="grid max-w-3xl gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <TextInput
+              fieldKey="servings"
+              label="Rendimento"
+              value={draft.servings}
+              error={errors.servings}
+              onChange={(e) => change({ servings: e.target.value })}
+              placeholder="6 porções"
+              hint="Com um número, dá para ajustar as porções."
+              autoComplete="off"
+              className="sm:col-span-2 lg:col-span-1"
+            />
+            <TextInput
+              fieldKey="prepTime"
+              label="Preparo (min)"
+              value={draft.prepTime}
+              error={errors.prepTime}
+              onChange={(e) => change({ prepTime: e.target.value })}
+              inputMode="numeric"
+              autoComplete="off"
+            />
+            <TextInput
+              fieldKey="cookTime"
+              label="Forno/fogo (min)"
+              value={draft.cookTime}
+              error={errors.cookTime}
+              onChange={(e) => change({ cookTime: e.target.value })}
+              inputMode="numeric"
+              autoComplete="off"
+            />
+            <SelectField
+              fieldKey="difficulty"
+              label="Dificuldade"
+              value={draft.difficulty}
+              error={errors.difficulty}
+              onChange={(e) => change({ difficulty: e.target.value as RecipeDraft['difficulty'] })}
+            >
+              <option value="">Não informada</option>
+              {DIFFICULTIES.map((difficulty) => (
+                <option key={difficulty} value={difficulty}>
+                  {difficulty[0].toUpperCase() + difficulty.slice(1)}
+                </option>
+              ))}
+            </SelectField>
+          </div>
+        </section>
 
-      <Section title="Modo de preparo" id="editar-passos">
-        <StepsEditor
-          items={draft.steps}
-          errors={errors}
-          onChange={(steps) => change({ steps })}
-          announce={announce}
-        />
-      </Section>
+        <Section title="Ingredientes" id="editar-ingredientes">
+          <IngredientsEditor
+            items={draft.ingredients}
+            errors={errors}
+            onChange={(ingredients) => change({ ingredients })}
+            announce={announce}
+          />
+        </Section>
 
-      <Section title="Dicas" id="editar-dicas">
-        <TipsEditor
-          items={draft.tips}
-          errors={errors}
-          onChange={(tips) => change({ tips })}
-          announce={announce}
-        />
-      </Section>
+        <Section title="Modo de preparo" id="editar-passos">
+          <StepsEditor
+            items={draft.steps}
+            errors={errors}
+            onChange={(steps) => change({ steps })}
+            announce={announce}
+          />
+        </Section>
 
-      <Section title="Tags" id="editar-tags">
-        <TagsEditor
-          tags={draft.tags}
-          errors={errors}
-          onChange={(tags) => change({ tags })}
-          announce={announce}
-        />
-      </Section>
+        <Section title="Dicas" id="editar-dicas">
+          <TipsEditor
+            items={draft.tips}
+            errors={errors}
+            onChange={(tips) => change({ tips })}
+            announce={announce}
+          />
+        </Section>
 
-      {/* Ações sempre à vista no fim da tela enquanto se edita. */}
-      <div className="sticky bottom-0 z-10 -mx-3 flex flex-wrap items-center justify-end gap-2 border-t border-line bg-card/95 px-3 py-3 backdrop-blur sm:-mx-8 sm:px-8 lg:-mx-12 lg:px-12">
-        <p className="mr-auto text-sm text-ink-soft" aria-live="polite">
-          {update.isPending ? 'Salvando…' : dirty ? 'Alterações não salvas' : 'Nada alterado'}
-        </p>
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={onCancel}
-          disabled={update.isPending}
+        <Section title="Tags" id="editar-tags">
+          <TagsEditor
+            tags={draft.tags}
+            errors={errors}
+            onChange={(tags) => change({ tags })}
+            announce={announce}
+          />
+        </Section>
+
+        {/* Ações sempre à vista no fim da tela enquanto se edita. */}
+        <div
+          ref={actionsRef}
+          className="editor-actions sticky bottom-0 z-10 -mx-3 flex flex-wrap items-center justify-end gap-2 border-t border-line bg-card/95 px-3 py-3 backdrop-blur sm:-mx-8 sm:px-8 lg:-mx-12 lg:px-12"
         >
-          Cancelar
-        </button>
-        <button type="submit" className="btn-primary" disabled={update.isPending}>
-          {update.isPending ? 'Salvando…' : 'Salvar alterações'}
-        </button>
-      </div>
-    </form>
+          <p className="mr-auto text-sm text-ink-soft" aria-live="polite">
+            {update.isPending ? 'Salvando…' : dirty ? 'Alterações não salvas' : 'Nada alterado'}
+          </p>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onCancel}
+            disabled={update.isPending}
+          >
+            Cancelar
+          </button>
+          <button type="submit" className="btn-primary" disabled={update.isPending}>
+            {update.isPending ? 'Salvando…' : 'Salvar alterações'}
+          </button>
+        </div>
+      </form>
+    </>
   )
 }

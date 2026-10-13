@@ -3,6 +3,7 @@
 
 import type { Difficulty, FieldError, Recipe, RecipeUpdate } from '../api/types'
 import { formatTimestamp } from './format'
+import { charCount } from './text'
 
 export const LIMITS = {
   title: 200,
@@ -192,13 +193,13 @@ export function validateDraft(
 
   const title = draft.title.trim()
   if (!title) errors.title = 'Dê um nome à receita.'
-  else if (title.length > LIMITS.title) errors.title = tooLong(LIMITS.title)
+  else if (charCount(title) > LIMITS.title) errors.title = tooLong(LIMITS.title)
 
   const summary = draft.summary.trim()
-  if (summary.length > LIMITS.summary) errors.summary = tooLong(LIMITS.summary)
+  if (charCount(summary) > LIMITS.summary) errors.summary = tooLong(LIMITS.summary)
 
   const servings = draft.servings.trim()
-  if (servings.length > LIMITS.servings) errors.servings = tooLong(LIMITS.servings)
+  if (charCount(servings) > LIMITS.servings) errors.servings = tooLong(LIMITS.servings)
 
   const minutes: Record<'prepTime' | 'cookTime', number | null> = { prepTime: null, cookTime: null }
   for (const field of ['prepTime', 'cookTime'] as const) {
@@ -216,7 +217,7 @@ export function validateDraft(
   for (const item of ingredients) {
     if (!item.name.trim()) errors[`ingredients.${item.key}.name`] = 'Diga qual é o ingrediente.'
     for (const field of ['name', 'quantity', 'unit', 'note', 'group'] as const) {
-      if (item[field].trim().length > LIMITS.ingredientField) {
+      if (charCount(item[field].trim()) > LIMITS.ingredientField) {
         errors[`ingredients.${item.key}.${field}`] = tooLong(LIMITS.ingredientField)
       }
     }
@@ -228,7 +229,7 @@ export function validateDraft(
   for (const step of steps) {
     const text = step.text.trim()
     if (!text) errors[`steps.${step.key}.text`] = 'Escreva o que fazer neste passo.'
-    else if (text.length > LIMITS.stepText)
+    else if (charCount(text) > LIMITS.stepText)
       errors[`steps.${step.key}.text`] = tooLong(LIMITS.stepText)
     const seconds = parseTimestamp(step.time)
     if (seconds === undefined) {
@@ -244,13 +245,14 @@ export function validateDraft(
   const tips = draft.tips.filter((tip) => tip.text.trim())
   if (tips.length > LIMITS.tips) errors.tips = `No máximo ${LIMITS.tips} dicas.`
   for (const tip of tips) {
-    if (tip.text.trim().length > LIMITS.tipText) errors[`tips.${tip.key}`] = tooLong(LIMITS.tipText)
+    if (charCount(tip.text.trim()) > LIMITS.tipText)
+      errors[`tips.${tip.key}`] = tooLong(LIMITS.tipText)
   }
 
   const tags = draft.tags.map(normalizeTag).filter(Boolean)
   if (tags.length > LIMITS.tags) errors.tags = `No máximo ${LIMITS.tags} tags.`
   tags.forEach((tag, index) => {
-    if (tag.length > LIMITS.tagText) errors[`tags.${index}`] = tooLong(LIMITS.tagText)
+    if (charCount(tag) > LIMITS.tagText) errors[`tags.${index}`] = tooLong(LIMITS.tagText)
   })
 
   if (Object.keys(errors).length > 0) return { errors, payload: null }

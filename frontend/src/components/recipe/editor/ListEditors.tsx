@@ -410,10 +410,11 @@ export function TagsEditor({
             <li key={tag}>
               <span className="tag-chip gap-1 py-0 pr-0 pl-3">
                 #{tag}
+                {/* 36px visíveis e 44px de área de toque (::after, 4px para cada lado). */}
                 <button
                   type="button"
                   onClick={() => remove(tag)}
-                  className="inline-flex size-9 items-center justify-center rounded-full hover:bg-danger-tint hover:text-danger"
+                  className="relative inline-flex size-9 items-center justify-center rounded-full after:absolute after:-inset-1 hover:bg-danger-tint hover:text-danger"
                   aria-label={`Remover a tag ${tag}`}
                 >
                   <span aria-hidden="true">×</span>

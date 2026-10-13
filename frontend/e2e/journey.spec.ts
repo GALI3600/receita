@@ -89,12 +89,12 @@ test('cadastro → confirmação → login → livro → receita → favoritar �
 
   await test.step('favoritar persiste e aparece no filtro de favoritas', async () => {
     await page.getByRole('button', { name: 'Favoritar' }).click()
-    await expect(page.getByRole('button', { name: 'Favorita' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
+    // O rótulo diz o estado e a ação (sem aria-pressed).
+    const favorited = page.getByRole('button', { name: 'Favorita: tirar dos favoritos' })
+    await expect(favorited).toBeVisible()
+    await expect(favorited).not.toHaveAttribute('aria-pressed')
     await page.reload()
-    await expect(page.getByRole('button', { name: 'Favorita' })).toBeVisible()
+    await expect(favorited).toBeVisible()
 
     await page.goto('/livro')
     await page.getByRole('button', { name: 'Favoritas' }).click()

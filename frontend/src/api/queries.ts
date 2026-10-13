@@ -8,6 +8,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { pollInterval } from '../lib/importStatus'
+import { forgetLocalUserData } from '../lib/unsavedDrafts'
 import { ApiError } from './client'
 import { accountApi, authApi, importsApi, recipesApi } from './endpoints'
 import type { ImportOut, Me, Recipe, RecipeFilters, RecipePage, RecipeUpdate } from './types'
@@ -31,7 +32,11 @@ function shouldRetry(failureCount: number, error: unknown): boolean {
   return failureCount < 2
 }
 
-/** QueryClient do app: uma sessão expirada (401 em qualquer pedido) desloga a interface. */
+/**
+ * QueryClient do app: uma sessão expirada (401 em qualquer pedido) desloga a interface. O que
+ * estava sendo editado não se perde: o editor e as notas guardam o que falta salvar na aba
+ * (lib/unsavedDrafts) e recuperam depois do login.
+ */
 export function createQueryClient(): QueryClient {
   const client: QueryClient = new QueryClient({
     queryCache: new QueryCache({ onError: (error) => handleUnauthorized(client, error) }),
@@ -90,8 +95,12 @@ export function useLogin() {
   })
 }
 
-/** Esquece a sessão no cliente: o usuário vira anônimo e o cache dele some. */
+/**
+ * Esquece a sessão no cliente (sair da conta, conta excluída): o usuário vira anônimo, o cache
+ * some e também o que ficou guardado no navegador (marcações, rascunhos).
+ */
 export function clearSession(client: QueryClient) {
+  forgetLocalUserData()
   client.removeQueries({ predicate: (query) => query.queryKey[0] !== 'me' })
   client.setQueryData(queryKeys.me, null)
 }

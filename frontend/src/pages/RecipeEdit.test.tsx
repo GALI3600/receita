@@ -251,6 +251,66 @@ describe('edição da receita', () => {
   })
 })
 
+describe('sessão expirada no meio da edição', () => {
+  beforeEach(() => installFakeYouTube())
+
+  it('salvar com 401 leva ao login sem perder o rascunho, que volta ao reabrir a receita', async () => {
+    let loggedIn = true
+    const { calls } = mockApi({
+      ...baseRoutes,
+      'GET /api/auth/me': () =>
+        loggedIn ? json(200, makeMe()) : apiError(401, 'unauthorized', 'Entre na sua conta.'),
+      'PATCH /api/recipes/rec-1': () => {
+        loggedIn = false
+        return apiError(401, 'unauthorized', 'Entre na sua conta.')
+      },
+    })
+    const first = renderRecipe()
+    await openEditor()
+    await userEvent.clear(screen.getByLabelText('Título'))
+    await userEvent.type(screen.getByLabelText('Título'), 'Bolo editado longo')
+    await userEvent.click(screen.getByRole('button', { name: 'Salvar alterações' }))
+
+    // O 401 desloga a interface e manda para o login (com volta para a receita)...
+    await waitFor(() =>
+      expect(screen.getByTestId('location')).toHaveTextContent('/entrar?next=%2Freceitas%2Frec-1'),
+    )
+    expect(calls.filter((call) => call.method === 'PATCH')).toHaveLength(1)
+    first.unmount()
+
+    // ...e, depois de entrar de novo, a receita reabre no editor com o que tinha sido digitado.
+    loggedIn = true
+    mockApi({ ...baseRoutes, 'PATCH /api/recipes/rec-1': patchEcho })
+    renderRecipe()
+    expect(await screen.findByText(/Recuperamos as alterações/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Título')).toHaveValue('Bolo editado longo')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Salvar alterações' }))
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Bolo editado longo' }),
+    ).toBeInTheDocument()
+    expect(window.sessionStorage.length).toBe(0)
+  })
+
+  it('cancelar o rascunho recuperado descarta o que estava guardado', async () => {
+    mockApi(baseRoutes)
+    const first = renderRecipe()
+    await openEditor()
+    await userEvent.type(screen.getByLabelText('Título'), ' especial')
+    first.unmount()
+
+    mockApi(baseRoutes)
+    renderRecipe()
+    expect(await screen.findByLabelText('Título')).toHaveValue('Bolo de cenoura com calda especial')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Descartar' }))
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Bolo de cenoura com calda' }),
+    ).toBeInTheDocument()
+    expect(window.sessionStorage.length).toBe(0)
+  })
+})
+
 describe('restaurar a receita original', () => {
   beforeEach(() => installFakeYouTube())
 

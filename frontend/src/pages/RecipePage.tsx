@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { isApiError } from '../api/client'
@@ -18,7 +18,10 @@ import { isPlayerUnavailable, type PlayerStatus } from '../components/youtube/pl
 import { describeError } from '../lib/errors'
 import { formatMinutes, totalMinutes, youtubeWatchUrl } from '../lib/format'
 import { parseServings } from '../lib/quantity'
+import { isDraftDirty, toDraft, type RecipeDraft } from '../lib/recipeDraft'
+import { loadRecipeDraft } from '../lib/unsavedDrafts'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
+import { useSession } from '../session/context'
 
 function PencilIcon() {
   return (
@@ -167,6 +170,71 @@ function RecipeManagement({ recipe, onRestored }: { recipe: Recipe; onRestored: 
   )
 }
 
+/**
+ * Caixa dos ingredientes no desktop: quando a coluna fixa não cabe na altura da tela, só a lista
+ * rola. Se há itens abaixo da borda, o fim da caixa esmaece e um botão avisa (e rola).
+ */
+function IngredientsScroller({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [state, setState] = useState({ overflows: false, moreBelow: false })
+
+  useEffect(() => {
+    const box = ref.current
+    if (!box) return
+    function measure() {
+      if (!box) return
+      const overflows = box.scrollHeight - box.clientHeight > 1
+      const moreBelow = overflows && box.scrollTop + box.clientHeight < box.scrollHeight - 4
+      setState((current) =>
+        current.overflows === overflows && current.moreBelow === moreBelow
+          ? current
+          : { overflows, moreBelow },
+      )
+    }
+    measure()
+    box.addEventListener('scroll', measure, { passive: true })
+    window.addEventListener('resize', measure)
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(box)
+    if (box.firstElementChild) observer?.observe(box.firstElementChild)
+    return () => {
+      box.removeEventListener('scroll', measure)
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [])
+
+  return (
+    <>
+      <div
+        ref={ref}
+        data-more-below={state.moreBelow}
+        className="recipe-ingredients lg:-mr-2 lg:min-h-0 lg:overflow-y-auto lg:pr-2"
+      >
+        {children}
+      </div>
+      {state.overflows && (
+        <button
+          type="button"
+          className={`btn-ghost mt-1 self-center text-sm max-lg:hidden print:hidden ${
+            state.moreBelow ? '' : 'invisible'
+          }`}
+          onClick={() => {
+            const box = ref.current
+            const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+            box?.scrollBy({
+              top: box.clientHeight * 0.75,
+              behavior: reduceMotion ? 'auto' : 'smooth',
+            })
+          }}
+        >
+          Mais ingredientes abaixo <span aria-hidden="true">↓</span>
+        </button>
+      )}
+    </>
+  )
+}
+
 /** Quantas porções mostrar; volta ao original quando o rendimento da receita muda. */
 function useServingsScale(servings: string | null) {
   const base = parseServings(servings)
@@ -197,6 +265,8 @@ function RecipeView({
   const [activeStep, setActiveStep] = useState<number | null>(null)
   const [playerStatus, setPlayerStatus] = useState<PlayerStatus>('loading')
   const favorite = useUpdateRecipe(recipe.id)
+  // O coração "pula" só quando a pessoa acabou de favoritar, não toda vez que a página abre.
+  const [justFavorited, setJustFavorited] = useState(false)
   const rating = useUpdateRecipe(recipe.id)
   const scale = useServingsScale(recipe.servings)
   const justImported = (location.state as { imported?: boolean } | null)?.imported === true
@@ -253,15 +323,22 @@ function RecipeView({
               <PencilIcon />
               Editar
             </button>
+            {/* O rótulo diz o estado e a ação (sem aria-pressed, que repetiria o estado). */}
             <button
               type="button"
               className="btn-secondary"
-              aria-pressed={recipe.is_favorite}
-              onClick={() => favorite.mutate({ is_favorite: !recipe.is_favorite })}
+              // O nome começa pelo texto visível ("Favorita") e diz o que o clique faz.
+              aria-label={recipe.is_favorite ? 'Favorita: tirar dos favoritos' : undefined}
+              onClick={() => {
+                setJustFavorited(!recipe.is_favorite)
+                favorite.mutate({ is_favorite: !recipe.is_favorite })
+              }}
             >
               <HeartIcon
                 filled={recipe.is_favorite}
-                className={`size-5 text-terracotta ${recipe.is_favorite ? 'heart-pop' : ''}`}
+                className={`size-5 text-terracotta ${
+                  recipe.is_favorite && justFavorited ? 'heart-pop' : ''
+                }`}
               />
               {recipe.is_favorite ? 'Favorita' : 'Favoritar'}
             </button>
@@ -321,13 +398,13 @@ function RecipeView({
                   />
                 </div>
               )}
-              <div className="recipe-ingredients lg:-mr-2 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+              <IngredientsScroller>
                 <IngredientList
                   recipeId={recipe.id}
                   ingredients={recipe.ingredients}
                   factor={scale.factor}
                 />
-              </div>
+              </IngredientsScroller>
             </section>
           </div>
 
@@ -421,15 +498,39 @@ function RecipeView({
   )
 }
 
+function pageTitle(recipe: ReturnType<typeof useRecipe>, isEditing: boolean): string | null {
+  if (recipe.data) return isEditing ? `Editando: ${recipe.data.title}` : recipe.data.title
+  if (recipe.isError)
+    return isNotFound(recipe.error) ? 'Receita não encontrada' : 'Não conseguimos abrir a receita'
+  // Carregando: só o nome do app (o esqueleto anuncia "Abrindo a receita…").
+  return null
+}
+
+function isNotFound(error: unknown): boolean {
+  return isApiError(error) && (error.status === 404 || error.status === 422)
+}
+
 export function RecipePage() {
   const { id = '' } = useParams()
+  const userId = useSession().user?.id
   const recipe = useRecipe(id)
   const [editing, setEditing] = useState<string | null>(null)
   const [notice, setNotice] = useState<{ id: string; text: string } | null>(null)
+  // Alterações não salvas guardadas na aba (a sessão expirou no meio da edição): ao abrir a
+  // receita, o editor volta com elas. Confere uma vez por receita, quando ela carrega.
+  const [restored, setRestored] = useState<{ id: string; draft: RecipeDraft } | null>(null)
+  const [draftCheckedFor, setDraftCheckedFor] = useState<string | null>(null)
+  if (recipe.data && draftCheckedFor !== id) {
+    setDraftCheckedFor(id)
+    const stored = loadRecipeDraft(userId, id)
+    if (stored && isDraftDirty(toDraft(recipe.data), stored)) {
+      setRestored({ id, draft: stored })
+      setEditing(id)
+      setNotice(null)
+    }
+  }
   const isEditing = editing === id
-  useDocumentTitle(
-    recipe.data ? (isEditing ? `Editando: ${recipe.data.title}` : recipe.data.title) : 'Receita',
-  )
+  useDocumentTitle(pageTitle(recipe, isEditing))
 
   function focusTitle() {
     requestAnimationFrame(() => {
@@ -439,8 +540,7 @@ export function RecipePage() {
 
   if (recipe.isPending) return <RecipeSkeleton />
   if (recipe.isError) {
-    const notFound =
-      isApiError(recipe.error) && (recipe.error.status === 404 || recipe.error.status === 422)
+    const notFound = isNotFound(recipe.error)
     return (
       <div className="mx-auto max-w-xl px-4 py-16 text-center">
         <h1 className="text-3xl font-semibold">
@@ -467,8 +567,10 @@ export function RecipePage() {
         <div className="page-sheet px-3 pt-6 sm:px-8 sm:pt-10 lg:px-12">
           <RecipeEditor
             recipe={recipe.data}
+            restored={restored?.id === id ? restored.draft : null}
             onClose={(saved) => {
               setEditing(null)
+              setRestored(null)
               setNotice(saved ? { id, text: 'Alterações salvas.' } : null)
               window.scrollTo({ top: 0 })
               focusTitle()

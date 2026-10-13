@@ -5,9 +5,10 @@ import { afterEach, vi } from 'vitest'
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
-  // Marcações de ingredientes guardadas por um teste não vazam para o próximo.
+  // Marcações e rascunhos guardados por um teste não vazam para o próximo.
   try {
     window.localStorage.clear()
+    window.sessionStorage.clear()
   } catch {
     // sem armazenamento
   }

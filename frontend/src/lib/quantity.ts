@@ -95,6 +95,8 @@ const KITCHEN_FRACTIONS: Array<[number, string]> = [
   [1, ''],
 ]
 const FRACTION_TOLERANCE = 0.035
+// Abaixo disto (sem parte inteira) nem o oitavo serve: fica o decimal ("0,06").
+const SMALLEST_FRACTION = 1 / 8 - FRACTION_TOLERANCE
 
 function formatDecimal(value: number): string {
   return (value >= 10 ? oneDecimalFormat : decimalFormat).format(value)
@@ -102,9 +104,10 @@ function formatDecimal(value: number): string {
 
 /**
  * Número em formato de receita. Estilo "fraction" (padrão): frações amigáveis (0,5 → "1/2",
- * 1,5 → "1 1/2", 0,333 → "1/3"), decimais só quando nenhuma fração chega perto; de 10 em diante
- * só inteiros e meios e, de 100 em diante, só inteiros ("133", "1.000"). Estilo "decimal":
- * vírgula, até duas casas ("2,25").
+ * 1,5 → "1 1/2", 0,333 → "1/3"); o que não bate com nenhuma vai para a fração de cozinha mais
+ * próxima (1,17 → "1 1/8", 0,58 → "5/8"), e só o que é pequeno demais até para um oitavo fica
+ * decimal ("0,06"). De 10 em diante só inteiros e meios e, de 100 em diante, só inteiros
+ * ("133", "1.000"). Estilo "decimal": vírgula, até duas casas ("2,25").
  */
 export function formatAmount(value: number, style: NumberStyle = 'fraction'): string {
   if (!Number.isFinite(value) || value < 0) return ''
@@ -127,7 +130,7 @@ export function formatAmount(value: number, style: NumberStyle = 'fraction'): st
   for (const candidate of KITCHEN_FRACTIONS) {
     if (Math.abs(rest - candidate[0]) < Math.abs(rest - best[0])) best = candidate
   }
-  if (Math.abs(rest - best[0]) > FRACTION_TOLERANCE) return formatDecimal(value)
+  if (whole === 0 && rest < SMALLEST_FRACTION) return formatDecimal(value)
   const wholePart = whole + (best[0] === 1 ? 1 : 0)
   const fraction = best[0] === 1 ? '' : best[1]
   if (wholePart === 0 && !fraction) {
@@ -176,8 +179,18 @@ function findAmounts(text: string): AmountMatch[] {
   return found
 }
 
-function formatScaled(match: AmountMatch, factor: number): string {
-  const parts = match.values.map((value, i) => formatAmount(value * factor, match.styles[i]))
+/**
+ * Quantidade escalada. Em unidades métricas (g, kg, ml, l), um número inteiro escalado vira
+ * decimal ("1 kg" → "1,17 kg"), não fração de cozinha; de 10 em diante, inteiro ("233 g").
+ */
+function formatScaled(match: AmountMatch, factor: number, metric = false): string {
+  const parts = match.values.map((value, i) => {
+    const scaled = value * factor
+    if (metric && match.styles[i] === 'integer') {
+      return formatAmount(scaled >= 10 ? Math.round(scaled) : scaled, 'decimal')
+    }
+    return formatAmount(scaled, match.styles[i])
+  })
   return match.separator === null ? parts[0] : `${parts[0]}${match.separator}${parts[1]}`
 }
 
@@ -212,7 +225,7 @@ export interface ScaledText {
 export function scaleText(
   text: string,
   factor: number,
-  { firstOnly = false }: { firstOnly?: boolean } = {},
+  { firstOnly = false, metric = false }: { firstOnly?: boolean; metric?: boolean } = {},
 ): ScaledText {
   const matches = findAmounts(text)
   if (matches.length === 0) return { text, before: null, after: null }
@@ -223,7 +236,7 @@ export function scaleText(
   let result = ''
   let cursor = 0
   for (const match of targets) {
-    result += text.slice(cursor, match.start) + formatScaled(match, factor)
+    result += text.slice(cursor, match.start) + formatScaled(match, factor, metric)
     cursor = match.end
   }
   result += text.slice(cursor)
@@ -239,7 +252,18 @@ function isPlural(value: number): boolean {
 
 const WORD_RE = /^(\p{L}+)/u
 
+// Palavras em "-ão" cujo plural não é "-ões".
+const PLURAL_AO: Record<string, string> = {
+  pão: 'pães',
+  mão: 'mãos',
+  grão: 'grãos',
+  cão: 'cães',
+}
+
 function pluralize(word: string): string {
+  const lower = word.toLowerCase()
+  // Mantém a primeira letra como veio ("Pão" → "Pães").
+  if (PLURAL_AO[lower]) return word[0] + PLURAL_AO[lower].slice(1)
   if (/ão$/.test(word)) return word.replace(/ão$/, 'ões')
   if (/[aeiouáéíóúâêô]$/i.test(word)) return `${word}s`
   if (/[rz]$/i.test(word)) return `${word}es`
@@ -248,6 +272,7 @@ function pluralize(word: string): string {
 
 function singularize(word: string): string {
   if (/ões$/.test(word)) return word.replace(/ões$/, 'ão')
+  if (/ães$/.test(word)) return word.replace(/ães$/, 'ão')
   if (/[rz]es$/i.test(word)) return word.slice(0, -2)
   if (/[aeiouáéíóúâêô]s$/i.test(word)) return word.slice(0, -1)
   return word
@@ -255,7 +280,7 @@ function singularize(word: string): string {
 
 /**
  * Concorda a primeira palavra de uma unidade com a quantidade nova ("xícara" → "xícaras",
- * "colheres de sopa" → "colher de sopa"). Abreviações ("g", "ml", "kg") e palavras curtas ficam
+ * "colheres de sopa" → "colher de sopa", "pão" → "pães"). Abreviações ("g", "ml", "kg") ficam
  * como estão; só muda quando a quantidade passou de singular para plural ou o contrário.
  */
 export function agreeUnit(unit: string, before: number | null, after: number | null): string {
@@ -264,7 +289,7 @@ export function agreeUnit(unit: string, before: number | null, after: number | n
   const willBePlural = isPlural(after)
   if (wasPlural === willBePlural) return unit
   const match = WORD_RE.exec(unit)
-  if (!match || match[1].length < 4) return unit
+  if (!match || match[1].length < 3) return unit
   const word = match[1]
   const changed = willBePlural ? pluralize(word) : singularize(word)
   return changed + unit.slice(word.length)
@@ -277,10 +302,14 @@ export interface ScalableIngredient {
   unit: string | null
 }
 
+const METRIC_UNIT_RE =
+  /^(?:k?g|mg|m?l|gramas?|quilos?|quilogramas?|mililitros?|litros?)(?![\p{L}])/iu
+
 /** Quantidade e unidade escaladas; sem número na quantidade, tudo fica igual. */
 export function scaleIngredient<T extends ScalableIngredient>(ingredient: T, factor: number): T {
   if (factor === 1 || !ingredient.quantity) return ingredient
-  const scaled = scaleText(ingredient.quantity, factor)
+  const metric = METRIC_UNIT_RE.test(ingredient.unit?.trim() ?? '')
+  const scaled = scaleText(ingredient.quantity, factor, { metric })
   if (scaled.before === null) return ingredient
   const unit = ingredient.unit ? agreeUnit(ingredient.unit, scaled.before, scaled.after) : null
   return { ...ingredient, quantity: scaled.text, unit }

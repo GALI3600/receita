@@ -101,6 +101,47 @@ describe('notas pessoais', () => {
     expect(patches(calls)).toHaveLength(2)
   })
 
+  it('com a sessão expirada o texto não se perde: volta depois do login e é salvo', async () => {
+    let loggedIn = true
+    mockApi({
+      ...routes(),
+      'GET /api/auth/me': () =>
+        loggedIn ? json(200, makeMe()) : apiError(401, 'unauthorized', 'Entre na sua conta.'),
+      'PATCH /api/recipes/rec-1': () => {
+        loggedIn = false
+        return apiError(401, 'unauthorized', 'Entre na sua conta.')
+      },
+    })
+    const first = renderRecipe()
+    await userEvent.type(await screen.findByLabelText('Minhas notas'), 'Usei canastra')
+    await userEvent.tab()
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/entrar?next='))
+    first.unmount()
+
+    loggedIn = true
+    const { calls } = mockApi(routes())
+    renderRecipe()
+    expect(await screen.findByLabelText('Minhas notas')).toHaveValue('Usei canastra')
+    expect(screen.getByText('Recuperamos uma nota que você não tinha salvado.')).toBeVisible()
+    await waitFor(() => expect(patches(calls)).toEqual([{ user_notes: 'Usei canastra' }]), {
+      timeout: 3000,
+    })
+    expect(await screen.findByText(/^Salvo às/)).toBeInTheDocument()
+    await waitFor(() => expect(window.sessionStorage.length).toBe(0))
+  })
+
+  it('conta caracteres como o backend: emoji vale 1', async () => {
+    const { calls } = mockApi(routes(makeRecipe({ user_notes: '🍰'.repeat(4999) })))
+    renderRecipe()
+
+    const notes = await screen.findByLabelText('Minhas notas')
+    expect(screen.getByText('4.999/5.000')).toBeInTheDocument()
+    await userEvent.type(notes, 'x')
+    await userEvent.tab()
+    expect(notes).not.toHaveAttribute('aria-invalid')
+    await waitFor(() => expect(patches(calls)).toHaveLength(1))
+  })
+
   it('texto longo demais não é enviado', async () => {
     const { calls } = mockApi(routes(makeRecipe({ user_notes: 'x'.repeat(5000) })))
     renderRecipe()
@@ -162,14 +203,23 @@ describe('avaliação e favorito', () => {
     renderRecipe()
 
     await userEvent.click(await screen.findByRole('button', { name: 'Favoritar' }))
-    // Antes da resposta já aparece como favorita.
-    expect(screen.getByRole('button', { name: 'Favorita' })).toHaveAttribute('aria-pressed', 'true')
+    // Antes da resposta já aparece como favorita (o rótulo diz o estado, sem aria-pressed).
+    const favorited = screen.getByRole('button', { name: 'Favorita: tirar dos favoritos' })
+    expect(favorited).not.toHaveAttribute('aria-pressed')
+    // O coração pula porque a pessoa acabou de favoritar.
+    expect(favorited.querySelector('svg')).toHaveClass('heart-pop')
     release()
-    expect(await screen.findByRole('button', { name: 'Favoritar' })).toHaveAttribute(
+    expect(await screen.findByRole('button', { name: 'Favoritar' })).not.toHaveAttribute(
       'aria-pressed',
-      'false',
     )
     expect(screen.getByText('Erro do servidor.')).toBeInTheDocument()
+  })
+
+  it('receita já favorita abre sem a animação do coração', async () => {
+    mockApi(routes(makeRecipe({ is_favorite: true })))
+    renderRecipe()
+    const button = await screen.findByRole('button', { name: 'Favorita: tirar dos favoritos' })
+    expect(button.querySelector('svg')).not.toHaveClass('heart-pop')
   })
 })
 

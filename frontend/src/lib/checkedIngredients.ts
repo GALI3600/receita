@@ -3,10 +3,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Ingredient } from '../api/types'
 import { readJson, writeStorage } from './storage'
 
-const PREFIX = 'receita:marcados:'
+export const CHECKED_PREFIX = 'receita:marcados:'
 
 export function checkedStorageKey(recipeId: string): string {
-  return `${PREFIX}${recipeId}`
+  return `${CHECKED_PREFIX}${recipeId}`
 }
 
 /**

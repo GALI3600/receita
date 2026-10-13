@@ -58,8 +58,17 @@ describe('formatAmount', () => {
     [3.6666, '3 2/3'],
     [1.98, '2'],
     [0.99, '1'],
-    [1.2, '1,2'],
     [0.02, '0,02'],
+    // Sem fração exata por perto: a fração de cozinha mais próxima, não um decimal.
+    [1.2, '1 1/4'],
+    [7 / 6, '1 1/8'],
+    [7 / 12, '5/8'],
+    [1 / 6, '1/8'],
+    [5 / 6, '7/8'],
+    [2.5 / 3, '7/8'],
+    // Pequeno demais até para 1/8: decimal.
+    [1 / 12, '0,08'],
+    [0.0625, '0,06'],
     [10.4, '10 1/2'],
     [10.2, '10'],
     [12.5, '12 1/2'],
@@ -155,6 +164,13 @@ describe('scaleText', () => {
 
 describe('agreeUnit', () => {
   it.each([
+    ['pão', 1, 2, 'pães'],
+    ['pães', 2, 1, 'pão'],
+    ['Pão', 1, 3, 'Pães'],
+    ['mão', 1, 2, 'mãos'],
+    ['mãos', 2, 1, 'mão'],
+    ['limão', 1, 2, 'limões'],
+    ['ovo', 1, 2, 'ovos'],
     ['xícara', 1, 2, 'xícaras'],
     ['xícara (chá)', 0.5, 2, 'xícaras (chá)'],
     ['xícaras', 2, 1, 'xícara'],
@@ -203,6 +219,32 @@ describe('scaleIngredient', () => {
     })
   })
 
+  it('porções que não dão conta exata viram frações de cozinha (6 → 7 e 6 → 1)', () => {
+    const scale = (quantity: string, unit: string | null, factor: number) => {
+      const scaled = scaleIngredient({ ...base, quantity, unit }, factor)
+      return `${scaled.quantity} ${scaled.unit ?? ''}`.trim()
+    }
+    expect(scale('1', null, 7 / 6)).toBe('1 1/8')
+    expect(scale('1', 'xícara (chá)', 7 / 6)).toBe('1 1/8 xícara (chá)')
+    expect(scale('1/2', 'xícara (chá)', 7 / 6)).toBe('5/8 xícara (chá)')
+    expect(scale('1/2', 'colher de chá', 7 / 6)).toBe('5/8 colher de chá')
+    expect(scale('1', null, 1 / 6)).toBe('1/8')
+    expect(scale('1/2', 'xícara (chá)', 1 / 6)).toBe('0,08 xícara (chá)')
+  })
+
+  it('em unidades métricas o número escalado fica decimal', () => {
+    const scale = (quantity: string, unit: string, factor: number) =>
+      scaleIngredient({ ...base, quantity, unit }, factor).quantity
+    expect(scale('1', 'kg', 7 / 6)).toBe('1,17')
+    expect(scale('2', 'litros', 1 / 3)).toBe('0,67')
+    expect(scale('1', 'l', 1.5)).toBe('1,5')
+    expect(scale('200', 'g', 7 / 6)).toBe('233')
+    // Fração escrita como fração continua fração.
+    expect(scale('1/2', 'kg', 1.5)).toBe('3/4')
+    // "lata" não é litro.
+    expect(scale('1', 'lata', 7 / 6)).toBe('1 1/8')
+  })
+
   it('mantém "a gosto" e quantidades sem número', () => {
     const toTaste = { ...base, quantity: null, unit: null }
     expect(scaleIngredient(toTaste, 2)).toBe(toTaste)
@@ -245,6 +287,8 @@ describe('rendimento', () => {
     ['4 a 6 porções', 8, '8 a 12 porções'],
     ['Rende 12 fatias', 6, 'Rende 6 fatias'],
     ['8', 4, '4'],
+    ['1 pão', 2, '2 pães'],
+    ['2 pães', 1, '1 pão'],
   ])('scaleServings("%s", %d) = "%s"', (text, count, expected) => {
     expect(scaleServings(text, count)).toBe(expected)
   })
