@@ -1,15 +1,18 @@
 import asyncio
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from arq import Retry
 from arq.connections import ArqRedis
 from arq.constants import in_progress_key_prefix, job_key_prefix, result_key_prefix
 from arq.worker import create_worker
+from httpx import AsyncClient
 from sqlalchemy import event, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -18,7 +21,9 @@ from app import queue, worker
 from app.config import get_settings
 from app.errors import (
     InternalError,
+    LLMBudgetExceededError,
     LLMMissingKeyError,
+    LLMRefusedError,
     LLMUnavailableError,
     NotEmbeddableError,
     TranscriptionFailedError,
@@ -26,6 +31,7 @@ from app.errors import (
     YoutubeBlockedError,
 )
 from app.models import Import, ImportStatus, LLMCall, Recipe, User, Video
+from app.schemas.imports import ImportOut
 from app.schemas.recipe_llm import RecipeLLM
 from app.schemas.transcript import Segment, TranscriptSource
 from app.services import imports, pipeline, recipe_llm, transcription, youtube
@@ -33,7 +39,7 @@ from app.services.locks import VideoLock
 from app.services.recipe_llm import PROMPT_VERSION, RecipeGeneration, VideoContext
 from app.services.transcription import Transcript
 from app.services.youtube import SubtitleTrack, VideoMetadata
-from tests.factories import GENERATED, SPEECH, make_user, make_video
+from tests.factories import GENERATED, SPEECH, headers, make_user, make_video, youtube_id
 
 YOUTUBE_ID = "abcdefghijk"
 WHISPER_SPEECH = [
@@ -84,7 +90,7 @@ class FakeServices:
         await self._record("metadata")
         if self.metadata_error:
             raise self.metadata_error
-        return self.meta
+        return replace(self.meta, youtube_id=youtube_id)
 
     async def transcribe_from_subtitles(self, *args: Any) -> Transcript | None:
         await self._record("subtitles")
@@ -162,9 +168,11 @@ def _on_sql(engine: AsyncEngine, matches: str, action: Callable[[], None]) -> No
     event.listen(engine.sync_engine, "before_cursor_execute", before_cursor_execute)
 
 
-async def _new_import(session: AsyncSession, user: User | None = None) -> Import:
+async def _new_import(
+    session: AsyncSession, user: User | None = None, yt_id: str = YOUTUBE_ID
+) -> Import:
     user = user or await make_user(session)
-    imp = Import(user_id=user.id, url=f"https://youtu.be/{YOUTUBE_ID}", youtube_id=YOUTUBE_ID)
+    imp = Import(user_id=user.id, url=f"https://youtu.be/{yt_id}", youtube_id=yt_id)
     session.add(imp)
     await session.commit()
     return imp
@@ -837,6 +845,92 @@ async def test_not_a_recipe_does_not_use_quota(
     assert (imp.status, imp.charged_at) == (ImportStatus.FAILED, None)
 
 
+async def test_costly_failures_are_limited_per_day(
+    ctx: dict[str, Any],
+    client: AsyncClient,
+    session: AsyncSession,
+    fake: FakeServices,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Vídeos com fala que não são receita: cada um custa uma chamada ao Claude e não gasta a
+    # cota, então sem outro limite uma conta só esgotaria o orçamento do dia de todo mundo.
+    monkeypatch.setattr(get_settings(), "daily_import_limit", 1)
+    monkeypatch.setattr(get_settings(), "daily_failed_import_limit", 2)
+    fake.llm_recipe = {**GENERATED, "is_recipe": False, "steps": []}
+    user = await make_user(session)
+
+    async def post(n: int) -> httpx.Response:
+        return await client.post(
+            "/imports", headers=headers(user), json={"url": f"https://youtu.be/{youtube_id(n)}"}
+        )
+
+    for n in range(2):
+        response = await post(n)
+        assert response.status_code == 202
+        result = await worker.process_import(ctx, response.json()["id"])
+        assert result == "falhou: not_a_recipe"
+
+    blocked = await post(2)
+
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["code"] == "too_many_failed_imports"
+    assert int(blocked.headers["Retry-After"]) <= 86400
+    assert fake.calls.count("llm") == 2
+    quota = (await client.get("/auth/me", headers=headers(user))).json()["quota"]
+    assert quota["used"] == 0
+    # Vídeos que já estão no site continuam liberados.
+    await make_video(session, youtube_id(3))
+    assert (await post(3)).status_code == 200
+
+
+async def test_failures_count_only_after_paid_claude_call(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    user = await make_user(session)
+    fake.llm_error = LLMRefusedError(llm_model=recipe_llm.MODEL, llm_usage={"output_tokens": 10})
+    refused = await _new_import(session, user)
+    assert await _run(ctx, refused) == "falhou: llm_refused"
+
+    # Sem chamada paga: chave ausente, vídeo que já se sabe não ser receita, metadados recusados.
+    fake.llm_error = LLMMissingKeyError()
+    await make_video(session, youtube_id(1), generated=None)
+    no_key = await _new_import(session, user, youtube_id(1))
+    assert await _run(ctx, no_key) == "falhou: llm_missing_key"
+    not_a_recipe = {**GENERATED, "is_recipe": False, "steps": []}
+    await make_video(session, youtube_id(2), generated=not_a_recipe)
+    known_non_recipe = await _new_import(session, user, youtube_id(2))
+    assert await _run(ctx, known_non_recipe) == "falhou: not_a_recipe"
+    fake.metadata_error = NotEmbeddableError()
+    not_embeddable = await _new_import(session, user, youtube_id(3))
+    assert await _run(ctx, not_embeddable) == "falhou: not_embeddable"
+
+    assert fake.calls.count("llm") == 2
+    refused = await _reload(session, refused)
+    assert refused.status is ImportStatus.FAILED and refused.cost_incurred_at is not None
+    for imp in (no_key, not_embeddable, known_non_recipe):
+        imp = await _reload(session, imp)
+        assert imp.status is ImportStatus.FAILED, imp.youtube_id
+        assert imp.cost_incurred_at is None, imp.error_code
+
+
+async def test_whisper_failure_counts_only_for_the_import_that_queued_it(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    fake.subtitles = None
+    fake.whisper_error = TranscriptionGaveUpError()
+    first = await _new_import(session)
+    assert await _run(ctx, first) == "na fila do whisper"
+    second = await _new_import(session)
+    assert await _run(ctx, second) == "aguardando whisper"
+
+    await worker.transcribe_whisper(ctx, YOUTUBE_ID, "pt")
+
+    first, second = await _reload(session, first), await _reload(session, second)
+    assert first.status is second.status is ImportStatus.FAILED
+    assert first.cost_incurred_at is not None
+    assert second.cost_incurred_at is None
+
+
 async def test_import_is_deferred_when_budget_is_over(
     ctx: dict[str, Any],
     session: AsyncSession,
@@ -852,7 +946,14 @@ async def test_import_is_deferred_when_budget_is_over(
 
     assert "llm" not in fake.calls
     imp = await _reload(session, imp)
-    assert (imp.status, imp.error_code, imp.charged_at) == (ImportStatus.DEFERRED, None, None)
+    assert (imp.status, imp.charged_at) == (ImportStatus.DEFERRED, None)
+    # O usuário fica sabendo por que o import está esperando.
+    error = ImportOut.from_import(imp).error
+    assert error is not None
+    assert (error.code, error.message) == (
+        "llm_budget_exceeded",
+        LLMBudgetExceededError.default_message,
+    )
     # O que não custa nada já ficou pronto para o dia seguinte.
     video = await session.scalar(select(Video).where(Video.youtube_id == YOUTUBE_ID))
     assert video is not None and video.transcript == SPEECH
@@ -884,7 +985,8 @@ async def test_deferred_imports_resume_when_budget_frees_up(
     await session.commit()
 
     assert await worker.resume_deferred_imports(ctx) == "1 retomado(s)"
-    assert (await _reload(session, imp)).status is ImportStatus.PENDING
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.error_code, imp.error_message) == (ImportStatus.PENDING, None, None)
     assert [job.job_id for job in await redis.queued_jobs()] == [f"import:{imp.id}"]
 
     assert await _run(ctx, imp) == "concluído"
@@ -909,3 +1011,29 @@ async def test_stale_recovery_leaves_deferred_imports_alone(
 
     assert await worker.recover_stale_imports(ctx) == "0 reenfileirado(s), 0 encerrado(s)"
     assert (await _reload(session, deferred)).status is ImportStatus.DEFERRED
+
+
+@pytest.fixture
+def tokyo_time(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Fuso do sistema a leste de UTC, onde 00:05 local ainda é o dia anterior em UTC."""
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.mark.usefixtures("tokyo_time")
+async def test_crons_follow_the_utc_day_whatever_the_system_timezone() -> None:
+    arq_worker = create_worker(worker.WorkerSettings)
+    [resume] = [
+        job for job in arq_worker.cron_jobs if job.coroutine is worker.resume_deferred_imports
+    ]
+
+    # Como o arq agenda: a próxima execução a partir de agora, no fuso do worker.
+    resume.calculate_next(datetime.now(arq_worker.timezone))
+
+    assert resume.next_run is not None
+    next_run = resume.next_run.astimezone(UTC)
+    assert (next_run.hour, next_run.minute) == (0, 5)
+    assert next_run - datetime.now(UTC) <= timedelta(days=1)

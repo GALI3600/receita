@@ -17,7 +17,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import queue
-from app.errors import AppError, QueueUnavailableError
+from app.errors import AppError, LLMBudgetExceededError, QueueUnavailableError
 from app.models import UNFINISHED_IMPORT_STATUSES, Import, ImportStatus, Recipe, User, Video
 from app.schemas.recipe_llm import RecipeLLM
 from app.services import quotas, recipe_llm, youtube
@@ -129,14 +129,27 @@ def mark_done(imp: Import, recipe_id: uuid.UUID, *, charged: bool = False) -> No
     imp.charged_at = datetime.now(UTC) if charged else None
 
 
+def mark_cost_incurred(imp: Import) -> None:
+    """O import gastou Claude ou whisper: se falhar, conta no limite diário de falhas caras."""
+    if imp.cost_incurred_at is None:
+        imp.cost_incurred_at = datetime.now(UTC)
+
+
 def mark_failed(imp: Import, error: AppError) -> None:
     imp.status = ImportStatus.FAILED
     imp.error_code = error.code
     imp.error_message = error.message
 
 
-def mark_deferred(imp: Import) -> None:
+def mark_deferred(imp: Import, reason: LLMBudgetExceededError) -> None:
+    """Adia o import; o motivo fica em `error_*` para o usuário até ele voltar para a fila."""
     imp.status = ImportStatus.DEFERRED
+    imp.error_code = reason.code
+    imp.error_message = reason.message
+
+
+def mark_resumed(imp: Import) -> None:
+    imp.status = ImportStatus.PENDING
     imp.error_code = None
     imp.error_message = None
 
@@ -154,7 +167,8 @@ async def create_import(
     Antes de enfileirar, tenta concluir na hora: receita já no livro do usuário, vídeo já
     processado por outra pessoa (cópia) ou um import do mesmo vídeo ainda em andamento
     (devolve esse mesmo import). Nenhum desses gasta cota; só um import que vai para a fila
-    precisa de cota livre (`QuotaExceededError`). Os pedidos do mesmo usuário são serializados
+    precisa de cota livre (`QuotaExceededError`) e de não ter estourado o limite de falhas caras
+    do dia (`TooManyFailedImportsError`). Os pedidos do mesmo usuário são serializados
     para que dois imports simultâneos não passem juntos do limite nem dupliquem o mesmo vídeo.
     """
     youtube_id = youtube.extract_youtube_id(url)

@@ -2,6 +2,8 @@ import logging
 import re
 import smtplib
 import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
 from email.message import EmailMessage
 from typing import Any
 
@@ -13,8 +15,14 @@ from app.models import User
 from app.services import email, security
 
 
-def _user(name: str = "Ana <script>") -> User:
-    return User(id=uuid.uuid4(), email="ana@example.com", name=name, password_hash="$argon2id$hash")
+def _user(name: str = "Ana <script>", *, verified: bool = True) -> User:
+    return User(
+        id=uuid.uuid4(),
+        email="ana@example.com",
+        name=name,
+        password_hash="$argon2id$hash",
+        email_verified_at=datetime.now(UTC) if verified else None,
+    )
 
 
 def _token(message: email.Email, path: str) -> str:
@@ -24,17 +32,37 @@ def _token(message: email.Email, path: str) -> str:
 
 
 def test_verification_email_links_to_the_frontend() -> None:
-    user = _user()
+    user = _user(verified=False)
 
     message = email.verification_email(user)
 
     assert message.to == "ana@example.com"
     assert message.subject == "Confirme seu e-mail no Receita"
-    assert message.text.startswith("Olá, Ana <script>!")
     assert "48 horas" in message.text
     token = _token(message, "/verificar-email")
     assert security.decode_email_verification_token(token) == (user.id, user.email)
     assert f'href="http://localhost:5173/verificar-email?token={token}"' in message.html
+
+
+@pytest.mark.parametrize(
+    "build", [email.verification_email, email.password_reset_email, email.account_exists_email]
+)
+def test_unverified_address_gets_no_text_chosen_by_whoever_signed_up(
+    build: Callable[[User], email.Email],
+) -> None:
+    # Qualquer um cadastra o e-mail de outra pessoa; o nome escolhido não pode chegar até ela.
+    user = _user("Promo: ganhe R$1000 em http://evil.example/x", verified=False)
+
+    message = build(user)
+
+    assert message.text.startswith("Olá!\n")
+    assert "evil.example" not in message.text and "evil.example" not in message.html
+
+
+def test_verified_user_is_greeted_by_name_with_html_escaped() -> None:
+    message = email.password_reset_email(_user())
+
+    assert message.text.startswith("Olá, Ana <script>!")
     assert "<script>" not in message.html and "Ana &lt;script&gt;" in message.html
 
 

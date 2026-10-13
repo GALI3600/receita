@@ -117,13 +117,19 @@ async def save_transcript(
 
 
 async def generate(
-    session: AsyncSession, video: Video, *, on_stage: StageCallback | None = None
+    session: AsyncSession,
+    video: Video,
+    *,
+    on_stage: StageCallback | None = None,
+    on_llm_call: Callable[[], None] | None = None,
 ) -> tuple[Video, bool]:
     """Gera a receita canônica com o Claude, se ainda não houver uma com o prompt atual.
 
     Devolve o vídeo e se esta chamada gerou uma receita nova (só essas gastam a cota do
     usuário). Levanta `NotARecipeError`/`NoTranscriptError` quando o vídeo não traz receita e
     `LLMBudgetExceededError` quando o orçamento do dia acabou e a receita ainda não existe.
+    `on_llm_call` roda quando a chamada ao Claude foi paga (com sucesso ou não), antes do commit
+    que a registra em `llm_calls`.
     """
     if video.transcript is None:
         raise ValueError(f"vídeo {video.youtube_id} ainda não foi transcrito")
@@ -152,10 +158,14 @@ async def generate(
         except PipelineError as exc:
             if exc.llm_usage is not None:
                 _add_llm_call(session, video, exc.llm_model, exc.llm_usage, exc.code)
+                if on_llm_call is not None:
+                    on_llm_call()
                 await session.commit()
             raise
 
         _add_llm_call(session, video, generation.model, generation.usage, None)
+        if on_llm_call is not None:
+            on_llm_call()
         video.generated_recipe = generation.recipe.model_dump(mode="json")
         video.llm_model = generation.model
         video.llm_usage = generation.usage

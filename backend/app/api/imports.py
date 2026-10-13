@@ -23,7 +23,7 @@ router = APIRouter(prefix="/imports", tags=["imports"])
         401: {"model": ErrorResponse},
         403: {"model": ErrorResponse, "description": "E-mail ainda não confirmado"},
         422: {"model": ErrorResponse},
-        429: {"model": ErrorResponse, "description": "Rate limit ou cota do dia esgotada"},
+        429: {"model": ErrorResponse, "description": "Rate limit, cota do dia ou limite de falhas"},
         503: {"model": ErrorResponse},
     },
 )

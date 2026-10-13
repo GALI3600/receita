@@ -26,6 +26,13 @@ class Import(UUIDPrimaryKey, Timestamps, Base):
             "charged_at",
             postgresql_where=text("charged_at IS NOT NULL"),
         ),
+        # Limite diário de falhas caras: imports que gastaram Claude ou whisper.
+        Index(
+            "ix_imports_user_id_cost_incurred_at",
+            "user_id",
+            "cost_incurred_at",
+            postgresql_where=text("cost_incurred_at IS NOT NULL"),
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
@@ -44,3 +51,6 @@ class Import(UUIDPrimaryKey, Timestamps, Base):
     # Quando o import terminou com uma receita nova gerada pelo Claude (só esses gastam a cota);
     # nulo para cópias, falhas e imports ainda em andamento.
     charged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Quando o import gastou recurso caro: uma chamada paga ao Claude ou o envio do vídeo para o
+    # whisper. Se ele falhar, conta no limite diário de falhas (`DAILY_FAILED_IMPORT_LIMIT`).
+    cost_incurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

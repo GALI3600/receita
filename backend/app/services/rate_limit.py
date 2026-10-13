@@ -40,12 +40,19 @@ def client_ip(request: Request) -> str:
 
 
 def ip_bucket(ip: str) -> str:
-    """Chave do limite para um IP: o próprio IPv4 ou a rede /64 do IPv6."""
+    """Chave do limite para um IP: o próprio IPv4 ou a rede /64 do IPv6.
+
+    Um IPv6 que carrega um IPv4 conta como esse IPv4: o mapeado (::ffff:a.b.c.d, como chegam
+    os clientes IPv4 num socket dual-stack) e o 6to4 (2002::/16, um /48 inteiro por IPv4).
+    """
     try:
         address = ipaddress.ip_address(ip)
     except ValueError:
         return ip or "desconhecido"
-    if address.version == 6:
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped or address.sixtofour
+        if embedded is not None:
+            return str(embedded)
         return str(ipaddress.ip_network(f"{address}/{IPV6_PREFIX}", strict=False))
     return str(address)
 
@@ -70,12 +77,16 @@ async def _count(redis: Redis, action: str, key: str, limit: RateLimit) -> tuple
     return count, math.ceil((window + 1) * limit.window_s - now)
 
 
-async def hit(redis: Redis, action: str, key: str, limit: RateLimit) -> None:
+async def hit(
+    redis: Redis, action: str, key: str, limit: RateLimit, message: str | None = None
+) -> None:
     """Conta um pedido; levanta `RateLimitedError` (com Retry-After) acima do limite."""
     counted = await _count(redis, action, key, limit)
     if counted is not None and counted[0] > limit.requests:
         count, retry_after = counted
-        raise RateLimitedError(retry_after, detail=f"{action} {key}: {count}/{limit.requests}")
+        raise RateLimitedError(
+            retry_after, message, detail=f"{action} {key}: {count}/{limit.requests}"
+        )
 
 
 async def allow(redis: Redis, action: str, key: str, limit: RateLimit) -> bool:

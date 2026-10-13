@@ -52,7 +52,7 @@ npm run dev
 |---|---|---|
 | POST | `/auth/register` `{name, email, password}` | Cria a conta e manda o link de confirmação (202). Resposta igual se o e-mail já tem conta |
 | POST | `/auth/verify` `{token}` | Confirma o e-mail (204) |
-| POST | `/auth/resend-verification` | Reenvia o link de confirmação (logado) |
+| POST | `/auth/resend-verification` | Reenvia o link de confirmação (logado); 429 depois de `RATE_LIMIT_VERIFICATION_EMAIL_PER_ADDRESS` e-mails para o endereço |
 | POST | `/auth/login` `{email, password}` | Abre a sessão (cookie `receita_session`) e devolve o mesmo que `/auth/me` |
 | POST | `/auth/logout` | Encerra a sessão (204) |
 | POST | `/auth/forgot-password` `{email}` | Manda o link de redefinição se houver conta; sempre 200 |
@@ -61,7 +61,7 @@ npm run dev
 | GET | `/account/export` | Todos os dados da conta em JSON (LGPD) |
 | DELETE | `/account` `{password}` | Apaga a conta, as receitas e os imports (204). Os vídeos compartilhados ficam |
 | POST | `/imports` `{url}` | Valida o link e enfileira (202). Se a receita já existe (no livro ou de outro usuário), conclui na hora (200). Exige e-mail confirmado |
-| GET | `/imports/{id}` | `status` (`pending` → `fetching` → `transcribing` → `generating` → `done`/`failed`, ou `deferred`), `recipe_id`, `error` e `queue_position` |
+| GET | `/imports/{id}` | `status` (`pending` → `fetching` → `transcribing` → `generating` → `done`/`failed`, ou `deferred`), `recipe_id`, `error` (o motivo da falha ou, em `deferred`, da espera) e `queue_position` |
 | GET | `/recipes?q=&tag=&favorite=&limit=&cursor=` | Livro do usuário, mais recentes primeiro; `q` busca no título, ingredientes e tags, sem diferenciar acentos |
 | GET | `/recipes/{id}` | Receita + vídeo (`youtube_id`, título, canal, thumbnail, duração) |
 | PATCH | `/recipes/{id}` | Edita os campos enviados, `is_favorite`, `user_notes` e `rating` (1–5) |
@@ -89,13 +89,22 @@ também `details`.
 
 - **Rate limit por IP** (Redis, janela fixa) em cadastro, login, "esqueci a senha", reenvio do
   link e `POST /imports`: 429 `rate_limited` com `Retry-After`. Valores em `RATE_LIMIT_*`; o
-  `X-Forwarded-For` só vale com `TRUST_PROXY_HEADERS=true`.
+  `X-Forwarded-For` só vale com `TRUST_PROXY_HEADERS=true`. IPv6 conta pela rede /64; um IPv4
+  escrito como IPv6 (`::ffff:a.b.c.d`, 6to4) conta como o próprio IPv4.
+- **E-mails de confirmação por endereço:** cadastro e reenvios somam no máximo
+  `RATE_LIMIT_VERIFICATION_EMAIL_PER_ADDRESS` (padrão 5/dia) para o mesmo e-mail, venham de que IP
+  vierem. Enquanto o e-mail não é confirmado, as mensagens não trazem o nome cadastrado.
 - **Cota por usuário:** `DAILY_IMPORT_LIMIT` receitas novas por dia UTC (padrão 10). Só conta o
   import que chamou o Claude e terminou `done`; cópias e falhas não contam. Imports em andamento
   ocupam a vaga enquanto não terminam. Estourou: 429 `quota_exceeded` com `Retry-After`.
+- **Falhas caras por usuário:** imports que falharam depois de uma chamada paga ao Claude ou de
+  mandar o vídeo para o whisper (ex.: vídeo que não é receita) não gastam a cota, mas têm limite
+  próprio, `DAILY_FAILED_IMPORT_LIMIT` por dia UTC (padrão 20). Estourou: 429
+  `too_many_failed_imports` com `Retry-After`; cópias continuam liberadas.
 - **Orçamento global:** quando o gasto do dia com o Claude (calculado do `usage` de cada chamada)
-  chega a `DAILY_LLM_BUDGET_USD`, vídeos novos ficam `deferred` e voltam para a fila depois da
-  meia-noite UTC (cron do worker). Cópias continuam funcionando.
+  chega a `DAILY_LLM_BUDGET_USD`, vídeos novos ficam `deferred` (com `error.code`
+  `llm_budget_exceeded` explicando a espera) e voltam para a fila às 00:05 UTC (cron do worker,
+  sempre em UTC). Cópias continuam funcionando.
 
 ```bash
 # cadastro → link no log → confirmação → login → import

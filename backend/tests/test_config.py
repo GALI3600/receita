@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -66,3 +69,10 @@ def test_invalid_rate_limit(monkeypatch: pytest.MonkeyPatch, value: str) -> None
 
     with pytest.raises(ValidationError, match="formato"):
         Settings(_env_file=None, environment="development")
+
+
+def test_every_setting_is_documented_in_env_example() -> None:
+    env_example = Path(__file__).parents[1] / ".env.example"
+    documented = set(re.findall(r"^([A-Z0-9_]+)=", env_example.read_text(), re.M))
+
+    assert {name.upper() for name in Settings.model_fields} - documented == set()

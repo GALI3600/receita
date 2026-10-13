@@ -29,6 +29,7 @@ class ErrorCode(StrEnum):
     CSRF_FAILED = "csrf_failed"
     RATE_LIMITED = "rate_limited"
     QUOTA_EXCEEDED = "quota_exceeded"
+    TOO_MANY_FAILED_IMPORTS = "too_many_failed_imports"
     EMAIL_NOT_VERIFIED = "email_not_verified"
     INVALID_CREDENTIALS = "invalid_credentials"
     INVALID_PASSWORD = "invalid_password"
@@ -277,6 +278,14 @@ class QuotaExceededError(TooManyRequestsError):
     default_message = (
         "Você chegou ao limite de receitas novas por hoje. Amanhã tem mais; enquanto isso, "
         "vídeos que já estão no site continuam liberados."
+    )
+
+
+class TooManyFailedImportsError(TooManyRequestsError):
+    code = ErrorCode.TOO_MANY_FAILED_IMPORTS
+    default_message = (
+        "Muitos dos vídeos que você mandou hoje não viraram receita. Amanhã dá para tentar de "
+        "novo; enquanto isso, vídeos que já estão no site continuam liberados."
     )
 
 

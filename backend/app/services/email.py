@@ -37,8 +37,14 @@ def frontend_link(path: str, **params: str) -> str:
     return f"{base}{path}{query}"
 
 
-def _render(to: str, subject: str, name: str, paragraphs: list[str], link: str, cta: str) -> Email:
-    greeting = f"Olá, {name}!"
+def _greeting(user: User) -> str:
+    # O nome é texto livre de quem cadastrou: só aparece depois que o dono do endereço confirmou
+    # o e-mail, senão qualquer um mandaria um texto seu (links, por exemplo) para outra pessoa.
+    return f"Olá, {user.name}!" if user.email_verified_at is not None else "Olá!"
+
+
+def _render(user: User, subject: str, paragraphs: list[str], link: str, cta: str) -> Email:
+    greeting = _greeting(user)
     text = "\n\n".join([greeting, paragraphs[0], link, *paragraphs[1:], "— Receita"])
     body = "".join(f"<p>{html.escape(p)}</p>" for p in paragraphs[1:])
     markup = (
@@ -51,16 +57,15 @@ def _render(to: str, subject: str, name: str, paragraphs: list[str], link: str, 
         f'<p style="font-size: 13px">Ou copie o endereço: {html.escape(link)}</p>'
         f"{body}<p>— Receita</p></div>"
     )
-    return Email(to=to, subject=subject, text=text, html=markup)
+    return Email(to=user.email, subject=subject, text=text, html=markup)
 
 
 def verification_email(user: User) -> Email:
     token = security.create_email_verification_token(user.id, user.email)
     hours = get_settings().email_verification_ttl_hours
     return _render(
-        user.email,
+        user,
         "Confirme seu e-mail no Receita",
-        user.name,
         [
             "Falta pouco para você começar o seu livro de receitas. Confirme seu e-mail:",
             f"O link vale por {hours} horas.",
@@ -75,9 +80,8 @@ def password_reset_email(user: User) -> Email:
     token = security.create_password_reset_token(user.id, user.password_hash)
     minutes = get_settings().password_reset_ttl_minutes
     return _render(
-        user.email,
+        user,
         "Redefinição de senha do Receita",
-        user.name,
         [
             "Recebemos um pedido para redefinir a senha da sua conta. Escolha uma senha nova:",
             f"O link vale por {minutes} minutos e só pode ser usado uma vez.",
@@ -91,9 +95,8 @@ def password_reset_email(user: User) -> Email:
 def account_exists_email(user: User) -> Email:
     """Para um cadastro com um e-mail que já tem conta (a API responde igual nos dois casos)."""
     return _render(
-        user.email,
+        user,
         "Você já tem uma conta no Receita",
-        user.name,
         [
             "Alguém tentou criar uma conta no Receita com este e-mail, mas ele já está "
             "cadastrado. Se foi você, é só entrar:",

@@ -23,7 +23,9 @@ class ImportOut(BaseModel):
     youtube_id: str
     status: ImportStatus
     recipe_id: uuid.UUID | None
-    error: ImportFailure | None
+    error: ImportFailure | None = Field(
+        description="Por que o import falhou ou, em `deferred`, por que está esperando."
+    )
     queue_position: int | None = Field(
         description="Posição aproximada na fila (1 = próximo); só enquanto espera."
     )

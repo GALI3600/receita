@@ -7,11 +7,11 @@ import jwt
 import pytest
 from httpx import AsyncClient
 from pydantic import SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import FORGOT_PASSWORD_MESSAGE
-from app.config import Settings
+from app.api.auth import FORGOT_PASSWORD_MESSAGE, RESEND_LIMIT_MESSAGE
+from app.config import RateLimit, Settings
 from app.models import User
 from app.services import security, turnstile
 from app.services.email import Email
@@ -358,6 +358,58 @@ async def test_resend_verification(
     assert (
         await client.post("/auth/verify", headers=CSRF, json={"token": token})
     ).status_code == 204
+
+
+async def test_verification_emails_are_limited_per_address(
+    client: AsyncClient,
+    session: AsyncSession,
+    outbox: list[Email],
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "trust_proxy_headers", True)
+    monkeypatch.setattr(settings, "rate_limit_verification_email_per_address", RateLimit(3, 86400))
+
+    def from_ip(n: int) -> dict[str, str]:
+        return {**CSRF, "X-Forwarded-For": f"203.0.113.{n}"}
+
+    # Quem cadastra o e-mail de outra pessoa troca de IP a cada pedido: o limite por IP não
+    # pega, o por endereço sim, somando o e-mail do cadastro e os reenvios.
+    assert (await _register(client)).status_code == 202
+    pending = await session.scalar(select(User))
+    assert pending is not None
+    responses = [
+        await client.post("/auth/resend-verification", headers={**headers(pending), **from_ip(n)})
+        for n in range(4)
+    ]
+
+    assert [response.status_code for response in responses] == [200, 200, 429, 429]
+    assert responses[-1].json()["error"] == {
+        "code": "rate_limited",
+        "message": RESEND_LIMIT_MESSAGE,
+    }
+    assert 0 < int(responses[-1].headers["Retry-After"]) <= 86400
+    assert len(outbox) == 3
+    assert {message.to for message in outbox} == {pending.email}
+
+
+async def test_recreated_account_shares_the_verification_email_limit(
+    client: AsyncClient,
+    session: AsyncSession,
+    outbox: list[Email],
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "rate_limit_verification_email_per_address", RateLimit(1, 86400))
+    assert (await _register(client)).status_code == 202
+    await session.execute(delete(User))
+    await session.commit()
+
+    again = await _register(client)
+
+    # Mesma resposta, mas sem um segundo e-mail para o endereço.
+    assert again.status_code == 202
+    assert len(outbox) == 1
 
 
 @pytest.mark.parametrize(

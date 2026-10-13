@@ -10,7 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, RedisDep, SessionDep, ip_rate_limit
-from app.config import get_settings
+from app.config import RateLimit, get_settings
 from app.errors import AppError
 from app.models import User
 from app.schemas.auth import (
@@ -34,6 +34,14 @@ REGISTER_MESSAGE = (
 FORGOT_PASSWORD_MESSAGE = (
     "Se existir uma conta com esse e-mail, enviamos um link para redefinir a senha."
 )
+
+RESEND_LIMIT_MESSAGE = (
+    "Já enviamos vários links de confirmação para o seu e-mail. Procure na caixa de entrada e "
+    "no spam; se precisar, peça outro mais tarde."
+)
+
+# Contador por endereço dos e-mails de confirmação (cadastro e reenvios), além do limite por IP.
+VERIFICATION_EMAIL = "verification-email"
 
 _RATE_LIMITED = {429: {"model": ErrorResponse}}
 _INVALID_TOKEN = {400: {"model": ErrorResponse}}
@@ -61,6 +69,10 @@ def clear_session_cookie(response: Response) -> None:
         httponly=True,
         samesite="lax",
     )
+
+
+def _verification_email_limit() -> RateLimit:
+    return get_settings().rate_limit_verification_email_per_address
 
 
 def _email_key(address: str) -> str:
@@ -97,7 +109,12 @@ async def register(
         session, name=body.name, email=body.email, password=body.password
     )
     if created:
-        background.add_task(email.deliver, email.verification_email(user))
+        # Conta no mesmo limite por endereço do reenvio (sem avisar: a resposta é sempre igual),
+        # para que apagar e recriar a conta não sirva de atalho.
+        if await rate_limit.allow(
+            redis, VERIFICATION_EMAIL, _email_key(user.email), _verification_email_limit()
+        ):
+            background.add_task(email.deliver, email.verification_email(user))
     elif await rate_limit.allow(
         redis, "register-email", _email_key(user.email), get_settings().rate_limit_register
     ):
@@ -122,11 +139,19 @@ async def verify_email(body: TokenIn, session: SessionDep) -> None:
     responses={401: {"model": ErrorResponse}, **_RATE_LIMITED},
 )
 async def resend_verification(
-    user: CurrentUser, session: SessionDep, background: BackgroundTasks
+    user: CurrentUser, session: SessionDep, redis: RedisDep, background: BackgroundTasks
 ) -> MessageOut:
+    """Reenvia o link; além do limite por IP, há um por endereço (429 quando passa dele)."""
     await session.commit()
     if user.email_verified_at is not None:
         return MessageOut(message="Seu e-mail já está confirmado.")
+    await rate_limit.hit(
+        redis,
+        VERIFICATION_EMAIL,
+        _email_key(user.email),
+        _verification_email_limit(),
+        RESEND_LIMIT_MESSAGE,
+    )
     background.add_task(email.deliver, email.verification_email(user))
     return MessageOut(message=f"Enviamos um novo link de confirmação para {user.email}.")
 

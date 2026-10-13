@@ -73,9 +73,14 @@ class Settings(BaseSettings):
     rate_limit_forgot_password: RateLimitSetting = RateLimit(5, 3600)
     rate_limit_resend_verification: RateLimitSetting = RateLimit(5, 3600)
     rate_limit_imports: RateLimitSetting = RateLimit(30, 3600)
+    # Por endereço, não por IP: e-mails de confirmação (cadastro e reenvios) para o mesmo e-mail.
+    rate_limit_verification_email_per_address: RateLimitSetting = RateLimit(5, 86400)
 
     # Receitas novas (que chamam o Claude) por usuário por dia UTC; cópias e falhas não contam.
     daily_import_limit: int = Field(default=10, ge=0)
+    # Imports por usuário por dia UTC que falharam depois de chamar o Claude ou passar pelo
+    # whisper (ex.: vídeos que não são receita). Eles não gastam a cota, mas custam do mesmo jeito.
+    daily_failed_import_limit: int = Field(default=20, ge=1)
     # Teto do gasto diário (UTC) com o Claude; ao atingir, vídeos novos ficam para o dia seguinte.
     daily_llm_budget_usd: float = Field(default=10.0, ge=0)
 

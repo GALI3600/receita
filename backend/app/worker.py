@@ -132,7 +132,10 @@ async def _run_import(session: AsyncSession, redis: ArqRedis, imp: Import) -> st
             )
             if transcript is None:
                 pipeline.raise_if_whisper_gave_up(video)
-                await queue.enqueue_whisper(redis, imp.youtube_id, meta.language)
+                # Quem põe o vídeo no whisper responde pela execução; quem só espera, não.
+                if await queue.enqueue_whisper(redis, imp.youtube_id, meta.language):
+                    imports.mark_cost_incurred(imp)
+                    await session.commit()
                 logger.info(
                     "import %s: vídeo %s sem legenda; fila do whisper", imp.id, meta.youtube_id
                 )
@@ -140,7 +143,9 @@ async def _run_import(session: AsyncSession, redis: ArqRedis, imp: Import) -> st
             await pipeline.save_transcript(session, video, transcript)
 
     assert video is not None
-    video, generated = await pipeline.generate(session, video, on_stage=stage)
+    video, generated = await pipeline.generate(
+        session, video, on_stage=stage, on_llm_call=lambda: imports.mark_cost_incurred(imp)
+    )
     recipe_id = await imports.copy_recipe(session, imp.user_id, video)
     imports.mark_done(imp, recipe_id, charged=generated)
     await session.commit()
@@ -178,7 +183,7 @@ async def _handle_failure(
         imp = await session.get(Import, import_id, populate_existing=True)
         if imp is None:
             return "ignorado"
-        imports.mark_deferred(imp)
+        imports.mark_deferred(imp, error)
         await session.commit()
         logger.warning("import %s adiado: %r", import_id, error)
         return "adiado"
@@ -343,7 +348,7 @@ async def resume_deferred_imports(ctx: Ctx) -> str:
         )
         resumed = list(deferred.all())
         for imp in resumed:
-            imp.status = ImportStatus.PENDING
+            imports.mark_resumed(imp)
         await session.commit()
     for imp in resumed:
         await queue.enqueue_import(redis, imp.id)
@@ -405,6 +410,9 @@ class WorkerSettings:
         ),
         cron(resume_deferred_imports, hour={0}, minute={5}, run_at_startup=True, timeout=120),
     ]
+    # As crons em UTC, como a cota e o orçamento (`quotas.day_start`); sem isso o arq usa o fuso
+    # do sistema e a retomada dos adiados poderia rodar antes de o orçamento zerar.
+    timezone = UTC
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10

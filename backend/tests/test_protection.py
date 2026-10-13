@@ -103,6 +103,31 @@ def test_ipv6_clients_share_their_64_network() -> None:
     assert rate_limit.ip_bucket("203.0.113.7") == "203.0.113.7"
 
 
+def test_ipv6_addresses_carrying_ipv4_count_as_that_ipv4() -> None:
+    # Num socket dual-stack, todo cliente IPv4 chega como ::ffff:a.b.c.d.
+    assert rate_limit.ip_bucket("::ffff:1.2.3.4") == "1.2.3.4"
+    assert rate_limit.ip_bucket("::ffff:5.6.7.8") == "5.6.7.8"
+    # 6to4: cada IPv4 tem um /48 inteiro, então o /64 não seria limite.
+    assert rate_limit.ip_bucket("2002:102:304:1::1") == "1.2.3.4"
+    assert rate_limit.ip_bucket("2002:102:304:2::1") == "1.2.3.4"
+
+
+async def test_dual_stack_ipv4_clients_have_separate_limits(
+    client: AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "rate_limit_login", RateLimit(1, 60))
+    monkeypatch.setattr(settings, "trust_proxy_headers", True)
+
+    async def login(ip: str) -> int:
+        response = await client.post(
+            "/auth/login", headers={**CSRF, "X-Forwarded-For": ip}, json=LOGIN
+        )
+        return response.status_code
+
+    assert [await login("::ffff:1.2.3.4"), await login("::ffff:5.6.7.8")] == [401, 401]
+    assert await login("1.2.3.4") == 429
+
+
 async def test_login_rate_limit(
     client: AsyncClient, redis: ArqRedis, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:

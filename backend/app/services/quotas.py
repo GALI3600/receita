@@ -1,9 +1,12 @@
 """Limites de uso: cota diária de receitas novas por usuário e orçamento diário do Claude.
 
-Os dois contam por dia UTC. A cota soma os imports concluídos hoje que geraram receita nova com
+Todos contam por dia UTC. A cota soma os imports concluídos hoje que geraram receita nova com
 o Claude (`Import.charged_at`) e os que ainda estão em andamento ou adiados, que podem vir a
-gastar: assim vários imports simultâneos não passam juntos do limite. O orçamento soma o custo
-de cada chamada paga ao Claude gravada em `llm_calls`, calculado a partir do `usage`.
+gastar: assim vários imports simultâneos não passam juntos do limite. Falhas não gastam a cota,
+mas as que custaram uma chamada ao Claude ou uma execução do whisper (`Import.cost_incurred_at`)
+têm um limite diário próprio, para que vídeos que não são receita não esgotem o orçamento de
+todos. O orçamento soma o custo de cada chamada paga ao Claude gravada em `llm_calls`, calculado
+a partir do `usage`.
 """
 
 import logging
@@ -17,8 +20,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.errors import LLMBudgetExceededError, QuotaExceededError
-from app.models import UNFINISHED_IMPORT_STATUSES, Import, LLMCall
+from app.errors import LLMBudgetExceededError, QuotaExceededError, TooManyFailedImportsError
+from app.models import UNFINISHED_IMPORT_STATUSES, Import, ImportStatus, LLMCall
 
 logger = logging.getLogger(__name__)
 
@@ -84,37 +87,64 @@ class ImportQuota:
         return max(0, self.limit - self.used)
 
 
-async def import_quota(
-    session: AsyncSession, user_id: uuid.UUID, now: datetime | None = None
-) -> ImportQuota:
-    """Uso do dia: receitas novas concluídas hoje + imports em andamento ou adiados."""
-    now = now or datetime.now(UTC)
-    charged, unfinished = (
+@dataclass(frozen=True, slots=True)
+class _ImportsToday:
+    charged: int
+    unfinished: int
+    costly_failures: int
+
+
+async def _imports_today(session: AsyncSession, user_id: uuid.UUID, now: datetime) -> _ImportsToday:
+    today = day_start(now)
+    charged, unfinished, costly_failures = (
         await session.execute(
             select(
-                func.count().filter(Import.charged_at >= day_start(now)),
+                func.count().filter(Import.charged_at >= today),
                 func.count().filter(Import.status.in_(list(UNFINISHED_IMPORT_STATUSES))),
+                func.count().filter(
+                    Import.status == ImportStatus.FAILED, Import.cost_incurred_at >= today
+                ),
             ).where(Import.user_id == user_id)
         )
     ).one()
+    return _ImportsToday(charged, unfinished, costly_failures)
+
+
+def _quota(usage: _ImportsToday, now: datetime) -> ImportQuota:
     return ImportQuota(
-        used=charged + unfinished,
+        used=usage.charged + usage.unfinished,
         limit=get_settings().daily_import_limit,
         resets_at=next_day_start(now),
     )
 
 
+async def import_quota(
+    session: AsyncSession, user_id: uuid.UUID, now: datetime | None = None
+) -> ImportQuota:
+    """Uso do dia: receitas novas concluídas hoje + imports em andamento ou adiados."""
+    now = now or datetime.now(UTC)
+    return _quota(await _imports_today(session, user_id, now), now)
+
+
 async def ensure_import_quota(session: AsyncSession, user_id: uuid.UUID) -> None:
     """Levanta `QuotaExceededError` se o usuário não pode começar outra receita nova hoje.
 
-    Para valer com pedidos simultâneos, quem chama precisa ter travado o usuário na transação
-    (ver `imports.create_import`) e gravar o import novo antes do commit.
+    Levanta `TooManyFailedImportsError` se ele já chegou a `DAILY_FAILED_IMPORT_LIMIT` falhas
+    caras hoje. Para valer com pedidos simultâneos, quem chama precisa ter travado o usuário na
+    transação (ver `imports.create_import`) e gravar o import novo antes do commit.
     """
     now = datetime.now(UTC)
-    quota = await import_quota(session, user_id, now)
+    usage = await _imports_today(session, user_id, now)
+    quota = _quota(usage, now)
     if quota.remaining <= 0:
         raise QuotaExceededError(
             seconds_until_tomorrow(now), detail=f"{quota.used}/{quota.limit} hoje"
+        )
+    failure_limit = get_settings().daily_failed_import_limit
+    if usage.costly_failures >= failure_limit:
+        raise TooManyFailedImportsError(
+            seconds_until_tomorrow(now),
+            detail=f"{usage.costly_failures}/{failure_limit} falhas caras hoje",
         )
 
 
