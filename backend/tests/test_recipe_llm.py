@@ -161,11 +161,21 @@ async def test_generate_recipe_records_fallback_model() -> None:
     assert result.usage["iterations"][0]["type"] == "fallback_message"
 
 
-async def test_generate_recipe_refusal() -> None:
+@pytest.mark.parametrize(
+    "content",
+    [
+        [],
+        # Recusa no meio da geração: JSON parcial, que o SDK não consegue validar.
+        [{"type": "text", "text": json.dumps(RECIPE)[:80]}],
+        [{"type": "text", "text": "I can't help with that."}],
+    ],
+    ids=["antes-da-saida", "json-parcial", "texto-de-recusa"],
+)
+async def test_generate_recipe_refusal(content: list[dict[str, Any]]) -> None:
     api = FakeAPI(
         _ok(
             _message(
-                content=[],
+                content=content,
                 stop_reason="refusal",
                 stop_details={"type": "refusal", "category": "bio", "explanation": None},
             )
@@ -176,6 +186,8 @@ async def test_generate_recipe_refusal() -> None:
         await generate_recipe(VIDEO, client=api.client())
     assert exc_info.value.code == "llm_refused"
     assert "bio" in (exc_info.value.detail or "")
+    assert exc_info.value.llm_usage == USAGE
+    assert exc_info.value.llm_model == MODEL
 
 
 async def test_generate_recipe_not_a_recipe_is_returned() -> None:
@@ -197,21 +209,45 @@ async def test_generate_recipe_not_a_recipe_is_returned() -> None:
     assert result.recipe.steps == []
 
 
-async def test_generate_recipe_truncated_output() -> None:
-    truncated = json.dumps(RECIPE)[:120]
-    api = FakeAPI(
-        _ok(_message(content=[{"type": "text", "text": truncated}], stop_reason="max_tokens"))
-    )
+@pytest.mark.parametrize(
+    "content",
+    [[{"type": "text", "text": json.dumps(RECIPE)[:120]}], []],
+    ids=["json-cortado", "sem-texto"],
+)
+async def test_generate_recipe_max_tokens(content: list[dict[str, Any]]) -> None:
+    usage = {"input_tokens": 50000, "output_tokens": 16000}
+    api = FakeAPI(_ok(_message(content=content, stop_reason="max_tokens", usage=usage)))
 
-    with pytest.raises(LLMInvalidOutputError):
+    with pytest.raises(LLMInvalidOutputError) as exc_info:
         await generate_recipe(VIDEO, client=api.client())
+    assert exc_info.value.detail == "resposta cortada por max_tokens"
+    assert exc_info.value.llm_usage == usage
 
 
-async def test_generate_recipe_max_tokens_without_text() -> None:
-    api = FakeAPI(_ok(_message(content=[], stop_reason="max_tokens")))
+async def test_generate_recipe_output_outside_schema_keeps_usage() -> None:
+    api = FakeAPI(_ok(_message(content=[{"type": "text", "text": '{"is_recipe": "talvez"}'}])))
 
-    with pytest.raises(LLMInvalidOutputError):
+    with pytest.raises(LLMInvalidOutputError) as exc_info:
         await generate_recipe(VIDEO, client=api.client())
+    assert "fora do schema" in (exc_info.value.detail or "")
+    assert exc_info.value.llm_usage == USAGE
+
+
+async def test_generate_recipe_recipe_without_steps_is_invalid() -> None:
+    empty = {**RECIPE, "ingredients": [], "steps": []}
+    api = FakeAPI(_ok(_message(content=[{"type": "text", "text": json.dumps(empty)}])))
+
+    with pytest.raises(LLMInvalidOutputError) as exc_info:
+        await generate_recipe(VIDEO, client=api.client())
+    assert exc_info.value.llm_usage == USAGE
+
+
+async def test_generate_recipe_unpaid_errors_have_no_usage() -> None:
+    api = FakeAPI(_error(400))
+
+    with pytest.raises(LLMError) as exc_info:
+        await generate_recipe(VIDEO, client=api.client())
+    assert exc_info.value.llm_usage is None
 
 
 async def test_generate_recipe_missing_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,6 +328,35 @@ def test_build_user_message_neutralizes_tag_injection() -> None:
     assert '<transcricao fonte="ausente">\n(sem transcrição)\n</transcricao>' in message
 
 
+def test_build_user_message_limits_description_and_transcript() -> None:
+    line = "bata os ovos com o açúcar até dobrar de volume e junte a farinha aos poucos"
+    huge = VideoContext(
+        title="Bolo",
+        channel=None,
+        duration_s=120,
+        description="ingrediente " * 100_000,
+        segments=[Segment(start=float(i), end=i + 1.0, text=line) for i in range(5000)],
+        transcript_source=TranscriptSource.MANUAL,
+    )
+
+    message = build_user_message(huge)
+
+    description = message.split("<descricao>\n", 1)[1].split("</descricao>", 1)[0]
+    transcript = message.split('<transcricao fonte="manual">\n', 1)[1].split("</transcricao>")[0]
+    assert len(description) <= recipe_llm.MAX_DESCRIPTION_CHARS + 40
+    assert len(transcript) <= recipe_llm.transcript_char_limit(120) + 40
+    assert description.rstrip().endswith("(cortado por tamanho)")
+    # O corte é numa quebra de linha: nenhum trecho fica pela metade.
+    assert transcript.splitlines()[-2].endswith(line)
+    assert len(message) < 10_000
+
+
+def test_transcript_char_limit_grows_with_duration_up_to_a_ceiling() -> None:
+    assert recipe_llm.transcript_char_limit(10) == recipe_llm.transcript_char_limit(60)
+    assert recipe_llm.transcript_char_limit(600) > recipe_llm.transcript_char_limit(60)
+    assert recipe_llm.transcript_char_limit(10**6) == recipe_llm.MAX_TRANSCRIPT_CHARS
+
+
 def test_system_prompt_is_stable_and_cacheable() -> None:
     system = recipe_llm.build_system()
     assert system == recipe_llm.build_system()
@@ -317,3 +382,46 @@ def test_normalize_recipe_validates_timestamps(
 ) -> None:
     normalized = recipe_llm.normalize_recipe(_recipe_with_steps(*timestamps), duration_s=533)
     assert [s.video_timestamp_s for s in normalized.steps] == expected
+
+
+def test_normalize_recipe_bounds_fields_to_recipe_columns() -> None:
+    hostile = recipe_llm.RecipeLLM.model_validate(
+        {
+            **RECIPE,
+            "title": "B" * 5000,
+            "servings": "s" * 500,
+            "prep_time_min": 10**12,
+            "cook_time_min": -5,
+            "ingredients": [{**RECIPE["ingredients"][0], "name": "x" * 1000}] * 500,
+            "steps": [
+                {"order": i, "text": "t" * 10_000, "video_timestamp_s": None} for i in range(500)
+            ],
+            "tips": ["dica"] * 100 + ["  "],
+            "tags": [f"tag{i}" for i in range(50)] + ["#" + "a" * 300],
+        }
+    )
+
+    recipe = recipe_llm.normalize_recipe(hostile, duration_s=533)
+
+    assert len(recipe.title) == recipe_llm.MAX_TITLE_CHARS
+    assert recipe.servings is not None and len(recipe.servings) <= 100
+    assert recipe.prep_time_min is None
+    assert recipe.cook_time_min is None
+    assert len(recipe.ingredients) == recipe_llm.MAX_INGREDIENTS
+    assert len(recipe.ingredients[0].name) == recipe_llm.MAX_FIELD_CHARS
+    assert len(recipe.steps) == recipe_llm.MAX_STEPS
+    assert recipe.steps[-1].order == recipe_llm.MAX_STEPS
+    assert len(recipe.steps[0].text) == recipe_llm.MAX_STEP_CHARS
+    assert len(recipe.tips) == recipe_llm.MAX_TIPS
+    assert len(recipe.tags) == recipe_llm.MAX_TAGS
+    assert all(len(tag) <= recipe_llm.MAX_TAG_CHARS for tag in recipe.tags)
+
+
+def test_normalize_recipe_keeps_valid_values() -> None:
+    recipe = recipe_llm.RecipeLLM.model_validate(RECIPE)
+    normalized = recipe_llm.normalize_recipe(recipe, duration_s=533)
+
+    assert normalized.title == RECIPE["title"]
+    assert normalized.servings == "12 fatias"
+    assert (normalized.prep_time_min, normalized.cook_time_min) == (15, 40)
+    assert normalized.ingredients == recipe.ingredients

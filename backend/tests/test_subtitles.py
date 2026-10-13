@@ -1,7 +1,9 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from app.services import youtube
 from app.services.youtube import (
     SubtitleTrack,
     clean_text,
@@ -199,3 +201,79 @@ def test_metadata_from_info_parses_tracks() -> None:
         ("auto", "pt-orig", False, ["json3"]),
         ("auto", "en", True, ["json3"]),
     ]
+
+
+@pytest.mark.parametrize(
+    ("formats", "fixture", "fetched"),
+    [
+        ({"json3": "https://x/j", "vtt": "https://x/v"}, "auto.pt.json3", ["https://x/j"]),
+        ({"vtt": "https://x/v"}, "auto.pt.vtt", ["https://x/v"]),
+    ],
+)
+async def test_download_subtitle_prefers_json3_and_falls_back_to_vtt(
+    monkeypatch: pytest.MonkeyPatch,
+    fixtures_dir: Path,
+    formats: dict[str, str],
+    fixture: str,
+    fetched: list[str],
+) -> None:
+    urls: list[str] = []
+
+    def fake_fetch(url: str) -> bytes:
+        urls.append(url)
+        return (fixtures_dir / fixture).read_bytes()
+
+    monkeypatch.setattr(youtube, "_fetch_url", fake_fetch)
+
+    segments = await youtube.download_subtitle(SubtitleTrack("pt", "auto", False, formats))
+
+    assert urls == fetched
+    assert [s["text"] for s in segments] == EXPECTED_AUTO_TEXTS
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.requested: int | None = None
+
+    def read(self, amt: int | None = None) -> bytes:
+        self.requested = amt
+        return self.body if amt is None else self.body[:amt]
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeYDL:
+    response: _FakeResponse
+
+    def __init__(self, opts: dict[str, Any]) -> None:
+        pass
+
+    def __enter__(self) -> "_FakeYDL":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def urlopen(self, request: object) -> _FakeResponse:
+        return self.response
+
+
+@pytest.mark.parametrize(("size", "ok"), [(100, True), (101, False)])
+def test_fetch_url_limits_subtitle_size(
+    monkeypatch: pytest.MonkeyPatch, size: int, ok: bool
+) -> None:
+    _FakeYDL.response = _FakeResponse(b"x" * size)
+    monkeypatch.setattr(youtube.yt_dlp, "YoutubeDL", _FakeYDL)
+
+    if ok:
+        assert youtube._fetch_url("https://x/legenda", max_bytes=100) == b"x" * size
+    else:
+        with pytest.raises(ValueError, match="maior que"):
+            youtube._fetch_url("https://x/legenda", max_bytes=100)
+    # Nunca lê a resposta inteira para a memória.
+    assert _FakeYDL.response.requested == 101

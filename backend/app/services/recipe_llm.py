@@ -4,7 +4,7 @@ import html
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 
 import anthropic
 from anthropic.types.beta import BetaTextBlockParam
@@ -17,8 +17,9 @@ from app.errors import (
     LLMMissingKeyError,
     LLMRefusedError,
     LLMUnavailableError,
+    PipelineError,
 )
-from app.schemas.recipe_llm import RecipeLLM
+from app.schemas.recipe_llm import Ingredient, RecipeLLM
 from app.schemas.transcript import Segment, TranscriptSource
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,29 @@ MAX_RETRIES = 3
 # Forma "default" dos fallbacks no servidor: em recusa por política, a própria API refaz o
 # pedido no modelo recomendado para a categoria. Esse header vale só para a forma "default".
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+# Limites da entrada: a legenda manual e a descrição são escritas por quem sobe o vídeo, e o
+# custo da chamada cresce com elas. A descrição do YouTube tem no máximo 5000 caracteres; a
+# fala real fica bem abaixo de 25 caracteres por segundo, já contando os marcadores [mm:ss].
+MAX_DESCRIPTION_CHARS = 5000
+TRANSCRIPT_CHARS_PER_SECOND = 25
+MAX_TRANSCRIPT_CHARS = 90_000
+_TRUNCATED_MARK = "[...] (cortado por tamanho)"
+
+# Limites da saída: a receita canônica é copiada para `Recipe` (servings VARCHAR(100), tempos
+# INTEGER) e o conteúdo do vídeo pode induzir valores absurdos.
+MAX_TIME_MIN = 48 * 60
+MAX_TITLE_CHARS = 200
+MAX_SUMMARY_CHARS = 1000
+MAX_SERVINGS_CHARS = 100
+MAX_FIELD_CHARS = 200
+MAX_STEP_CHARS = 2000
+MAX_TIP_CHARS = 500
+MAX_TAG_CHARS = 40
+MAX_INGREDIENTS = 100
+MAX_STEPS = 100
+MAX_TIPS = 30
+MAX_TAGS = 8
 
 SYSTEM_PROMPT = """\
 Você é o editor de um livro de receitas. Sua tarefa é transformar os dados de um vídeo de \
@@ -126,15 +150,32 @@ def _data(text: str) -> str:
     return html.escape(text.strip(), quote=False)
 
 
+def _truncate(text: str, limit: int, separator: str) -> str:
+    """Corta no último `separator` antes do limite e marca o corte para o modelo."""
+    if len(text) <= limit:
+        return text
+    cut = text.rfind(separator, 0, limit)
+    return f"{text[: cut if cut > 0 else limit].rstrip()}\n{_TRUNCATED_MARK}"
+
+
+def transcript_char_limit(duration_s: int) -> int:
+    return min(MAX_TRANSCRIPT_CHARS, max(duration_s, 60) * TRANSCRIPT_CHARS_PER_SECOND)
+
+
 def build_user_message(video: VideoContext) -> str:
-    transcript = format_transcript(video.segments) if video.segments else ""
+    transcript = _truncate(
+        format_transcript(video.segments) if video.segments else "",
+        transcript_char_limit(video.duration_s),
+        "\n",
+    )
+    description = _truncate(video.description.strip(), MAX_DESCRIPTION_CHARS, " ")
     source = video.transcript_source.value if video.transcript_source else "ausente"
     return (
         "<video>\n"
-        f"<titulo>{_data(video.title)}</titulo>\n"
+        f"<titulo>{_data(video.title[:MAX_TITLE_CHARS])}</titulo>\n"
         f"<canal>{_data(video.channel or '')}</canal>\n"
         f"<duracao_segundos>{video.duration_s}</duracao_segundos>\n"
-        f"<descricao>\n{_data(video.description) or '(sem descrição)'}\n</descricao>\n"
+        f"<descricao>\n{_data(description) or '(sem descrição)'}\n</descricao>\n"
         f'<transcricao fonte="{source}">\n{_data(transcript) or "(sem transcrição)"}\n'
         "</transcricao>\n"
         "</video>\n\n"
@@ -159,36 +200,80 @@ def get_client() -> anthropic.AsyncAnthropic:
     return _client_for_key(api_key)
 
 
-def _valid_timestamp(value: int | None, duration_s: int) -> int | None:
-    return value if value is not None and 0 <= value <= duration_s else None
+def _in_range(value: int | None, maximum: int) -> int | None:
+    return value if value is not None and 0 <= value <= maximum else None
+
+
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _clip_optional(text: str | None, limit: int) -> str | None:
+    if text is None:
+        return None
+    return _clip(text, limit) or None
+
+
+def _normalize_ingredient(ingredient: Ingredient) -> Ingredient:
+    return ingredient.model_copy(
+        update={
+            "name": _clip(ingredient.name, MAX_FIELD_CHARS),
+            "quantity": _clip_optional(ingredient.quantity, MAX_FIELD_CHARS),
+            "unit": _clip_optional(ingredient.unit, MAX_FIELD_CHARS),
+            "note": _clip_optional(ingredient.note, MAX_FIELD_CHARS),
+            "group": _clip_optional(ingredient.group, MAX_FIELD_CHARS),
+        }
+    )
 
 
 def normalize_recipe(recipe: RecipeLLM, duration_s: int) -> RecipeLLM:
-    """Renumera os passos, descarta timestamps fora do vídeo e limpa as tags."""
+    """Renumera os passos, descarta timestamps fora do vídeo e limpa as tags.
+
+    Também corta tamanhos e faixas para caberem nas colunas de `Recipe`.
+    """
+    ordered_steps = sorted(recipe.steps, key=lambda s: s.order)[:MAX_STEPS]
     steps = [
         step.model_copy(
             update={
                 "order": index,
-                "video_timestamp_s": _valid_timestamp(step.video_timestamp_s, duration_s),
+                "text": _clip(step.text, MAX_STEP_CHARS),
+                "video_timestamp_s": _in_range(step.video_timestamp_s, duration_s),
             }
         )
-        for index, step in enumerate(sorted(recipe.steps, key=lambda s: s.order), start=1)
+        for index, step in enumerate(ordered_steps, start=1)
     ]
-    tags = [tag.strip().lstrip("#").strip().lower() for tag in recipe.tags]
+    tags = [_clip(tag.strip().lstrip("#"), MAX_TAG_CHARS).lower() for tag in recipe.tags]
+    tips = [_clip(tip, MAX_TIP_CHARS) for tip in recipe.tips]
     return recipe.model_copy(
-        update={"steps": steps, "tags": list(dict.fromkeys(t for t in tags if t))}
+        update={
+            "title": _clip(recipe.title, MAX_TITLE_CHARS),
+            "summary": _clip(recipe.summary, MAX_SUMMARY_CHARS),
+            "servings": _clip_optional(recipe.servings, MAX_SERVINGS_CHARS),
+            "prep_time_min": _in_range(recipe.prep_time_min, MAX_TIME_MIN),
+            "cook_time_min": _in_range(recipe.cook_time_min, MAX_TIME_MIN),
+            "ingredients": [_normalize_ingredient(i) for i in recipe.ingredients[:MAX_INGREDIENTS]],
+            "steps": steps,
+            "tips": [tip for tip in tips if tip][:MAX_TIPS],
+            "tags": list(dict.fromkeys(t for t in tags if t))[:MAX_TAGS],
+        }
     )
 
 
 async def generate_recipe(
     video: VideoContext, *, client: anthropic.AsyncAnthropic | None = None
 ) -> RecipeGeneration:
+    """Gera a receita. Falhas depois de uma chamada paga levam `llm_model` e `llm_usage`."""
     client = client or get_client()
 
     try:
         # `messages.parse` existe também em `beta.messages`, que é onde o SDK aceita `fallbacks`
         # e `betas`; o SDK converte o RecipeLLM em output_config.format e valida a resposta.
-        response = await client.beta.messages.parse(
+        # A validação roda dentro do `parse` e levantaria ValidationError numa recusa com texto
+        # parcial ou numa saída cortada por max_tokens, antes de dar para olhar o stop_reason e
+        # o usage. Por isso a chamada vai por `with_raw_response`: o corpo bruto é lido
+        # primeiro e o `raw.parse()` (que valida) só roda depois das checagens.
+        raw = await client.beta.messages.with_raw_response.parse(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=build_system(),
@@ -198,9 +283,7 @@ async def generate_recipe(
             betas=[FALLBACK_BETA],
             fallbacks="default",
         )
-    except ValidationError as exc:
-        # O SDK valida o JSON dentro do parse: texto truncado ou fora do schema cai aqui.
-        raise LLMInvalidOutputError(detail=f"resposta fora do schema: {exc}") from exc
+        body = cast(dict[str, Any], await raw.json())
     except anthropic.APIConnectionError as exc:
         raise LLMUnavailableError(detail=f"{type(exc).__name__}: {exc}") from exc
     except anthropic.APIStatusError as exc:
@@ -209,27 +292,39 @@ async def generate_recipe(
             raise LLMUnavailableError(detail=f"{exc.status_code}: {exc}") from exc
         raise LLMError(detail=f"{exc.status_code}: {exc}") from exc
 
-    usage = response.usage.model_dump(mode="json", exclude_none=True)
+    model = str(body.get("model") or MODEL)
+    stop_reason = body.get("stop_reason")
+    usage = {k: v for k, v in (body.get("usage") or {}).items() if v is not None}
     logger.info(
         "claude %s respondeu (stop=%s, request_id=%s, uso=%s)",
-        response.model,
-        response.stop_reason,
-        response._request_id,
+        model,
+        stop_reason,
+        raw.request_id,
         usage,
     )
 
-    if response.stop_reason == "refusal":
-        category = response.stop_details.category if response.stop_details else None
-        raise LLMRefusedError(detail=f"recusa (categoria={category})")
-    if response.stop_reason == "max_tokens":
-        raise LLMInvalidOutputError(detail="resposta cortada por max_tokens")
+    def failure(error: type[PipelineError], detail: str) -> PipelineError:
+        return error(detail=detail, llm_model=model, llm_usage=usage)
 
-    recipe = response.parsed_output
-    if recipe is None:
-        raise LLMInvalidOutputError(detail=f"sem saída estruturada (stop={response.stop_reason})")
+    if stop_reason == "refusal":
+        category = (body.get("stop_details") or {}).get("category")
+        raise failure(LLMRefusedError, f"recusa (categoria={category})")
+    if stop_reason == "max_tokens":
+        raise failure(LLMInvalidOutputError, "resposta cortada por max_tokens")
+
+    try:
+        response = await raw.parse()
+    except ValidationError as exc:
+        raise failure(LLMInvalidOutputError, f"resposta fora do schema: {exc}") from exc
+    if response.parsed_output is None:
+        raise failure(LLMInvalidOutputError, f"sem saída estruturada (stop={stop_reason})")
+
+    recipe = normalize_recipe(response.parsed_output, video.duration_s)
+    if recipe.is_recipe and not recipe.steps:
+        raise failure(LLMInvalidOutputError, "is_recipe=true sem nenhum passo")
 
     return RecipeGeneration(
-        recipe=normalize_recipe(recipe, video.duration_s),
+        recipe=recipe,
         model=response.model,
         usage=usage,
         prompt_version=PROMPT_VERSION,

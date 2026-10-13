@@ -6,13 +6,22 @@ vez e reaproveitadas (a receita só é refeita quando `PROMPT_VERSION` muda).
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import NotARecipeError, NoTranscriptError
-from app.models import ImportStatus, Video
+from app.errors import (
+    ErrorCode,
+    LLMInvalidOutputError,
+    LLMRefusedError,
+    NotARecipeError,
+    NoTranscriptError,
+    PipelineError,
+    YoutubeBlockedError,
+)
+from app.models import ImportStatus, LLMCall, Video
 from app.services import recipe_llm, transcription, youtube
 from app.services.youtube import VideoMetadata
 
@@ -21,6 +30,14 @@ logger = logging.getLogger(__name__)
 StageCallback = Callable[[ImportStatus], Awaitable[None]]
 
 MIN_DESCRIPTION_WORDS = 15
+
+# Falhas do Claude que se repetem com a mesma entrada: depois de N chamadas pagas com o mesmo
+# prompt, o vídeo não volta para o Claude (até PROMPT_VERSION mudar). Erros transitórios
+# (indisponível, 5xx) não entram: não chegam a gerar cobrança.
+LLM_FAILURE_LIMITS: dict[ErrorCode, tuple[type[PipelineError], int]] = {
+    ErrorCode.LLM_REFUSED: (LLMRefusedError, 1),
+    ErrorCode.LLM_INVALID_OUTPUT: (LLMInvalidOutputError, 2),
+}
 
 
 async def process_video(
@@ -33,7 +50,8 @@ async def process_video(
     """Processa o vídeo e devolve o `Video` com transcrição e receita gerada.
 
     Levanta `PipelineError` (app.errors) com código estável em qualquer falha do domínio.
-    A sessão precisa ter `expire_on_commit=False` (como `SessionLocal`).
+    A sessão precisa ter `expire_on_commit=False` (como `SessionLocal`): toda leitura termina
+    com commit para que nenhuma transação fique aberta durante yt-dlp, whisper ou Claude.
     """
 
     async def stage(status: ImportStatus) -> None:
@@ -42,9 +60,13 @@ async def process_video(
 
     youtube_id = youtube.extract_youtube_id(url)
     video = await _get_video(session, youtube_id)
+    await session.commit()
 
-    if video is None or video.transcript is None:
-        await stage(ImportStatus.FETCHING)
+    await stage(ImportStatus.FETCHING)
+    if video is not None and video.transcript is not None:
+        await _revalidate(session, video)
+        logger.info("vídeo %s já transcrito; reaproveitando", youtube_id)
+    else:
         meta = await youtube.fetch_metadata(youtube_id)
         youtube.validate_metadata(meta)
         video = await _save_metadata(session, video, meta)
@@ -60,28 +82,35 @@ async def process_video(
             transcript.source,
             transcript.word_count,
         )
-    else:
-        logger.info("vídeo %s já transcrito; reaproveitando", youtube_id)
 
     if skip_llm:
         return video
 
-    has_speech = transcription.is_useful_transcript(video.transcript)
+    has_speech = transcription.is_useful_transcript(video.transcript, video.duration_s)
     if video.generated_recipe is None or video.prompt_version != recipe_llm.PROMPT_VERSION:
         if not has_speech and len(video.description.split()) < MIN_DESCRIPTION_WORDS:
             raise NoTranscriptError(detail="sem fala útil e descrição curta")
+        await _raise_if_llm_gave_up(session, video)
 
         await stage(ImportStatus.GENERATING)
-        generation = await recipe_llm.generate_recipe(
-            recipe_llm.VideoContext(
-                title=video.title,
-                channel=video.channel,
-                duration_s=video.duration_s,
-                description=video.description,
-                segments=video.transcript if has_speech else [],
-                transcript_source=video.transcript_source if has_speech else None,
+        try:
+            generation = await recipe_llm.generate_recipe(
+                recipe_llm.VideoContext(
+                    title=video.title,
+                    channel=video.channel,
+                    duration_s=video.duration_s,
+                    description=video.description,
+                    segments=video.transcript if has_speech else [],
+                    transcript_source=video.transcript_source if has_speech else None,
+                )
             )
-        )
+        except PipelineError as exc:
+            if exc.llm_usage is not None:
+                _add_llm_call(session, video, exc.llm_model, exc.llm_usage, exc.code)
+                await session.commit()
+            raise
+
+        _add_llm_call(session, video, generation.model, generation.usage, None)
         video.generated_recipe = generation.recipe.model_dump(mode="json")
         video.llm_model = generation.model
         video.llm_usage = generation.usage
@@ -99,6 +128,64 @@ async def process_video(
 
 async def _get_video(session: AsyncSession, youtube_id: str) -> Video | None:
     return await session.scalar(select(Video).where(Video.youtube_id == youtube_id))
+
+
+async def _revalidate(session: AsyncSession, video: Video) -> None:
+    """Confere de novo os metadados de um vídeo já processado (passo 1 do fluxo do plano).
+
+    Desde o primeiro import ele pode ter ficado privado, deixado de ser incorporável ou passado
+    do limite de duração. Bloqueio do YouTube não impede o reaproveitamento: o problema é do
+    acesso do servidor, o vídeo continua válido e o embed oficial não é afetado.
+    """
+    try:
+        meta = await youtube.fetch_metadata(video.youtube_id)
+    except YoutubeBlockedError as exc:
+        logger.warning(
+            "vídeo %s: metadados indisponíveis (%r); usando os salvos", video.youtube_id, exc
+        )
+        return
+    youtube.validate_metadata(meta)
+    await _save_metadata(session, video, meta)
+
+
+async def _raise_if_llm_gave_up(session: AsyncSession, video: Video) -> None:
+    rows = (
+        await session.execute(
+            select(LLMCall.error_code, func.count())
+            .where(
+                LLMCall.video_id == video.id,
+                LLMCall.prompt_version == recipe_llm.PROMPT_VERSION,
+                LLMCall.error_code.in_(list(LLM_FAILURE_LIMITS)),
+            )
+            .group_by(LLMCall.error_code)
+        )
+    ).all()
+    await session.commit()
+    for code, count in rows:
+        error, limit = LLM_FAILURE_LIMITS[ErrorCode(code)]
+        if count >= limit:
+            raise error(
+                detail=f"{count} falha(s) com o prompt {recipe_llm.PROMPT_VERSION}; "
+                "o Claude não é chamado de novo"
+            )
+
+
+def _add_llm_call(
+    session: AsyncSession,
+    video: Video,
+    model: str | None,
+    usage: dict[str, Any],
+    error_code: ErrorCode | None,
+) -> None:
+    session.add(
+        LLMCall(
+            video_id=video.id,
+            model=model or recipe_llm.MODEL,
+            prompt_version=recipe_llm.PROMPT_VERSION,
+            usage=usage,
+            error_code=error_code,
+        )
+    )
 
 
 def _apply_metadata(video: Video, meta: VideoMetadata) -> None:

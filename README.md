@@ -54,6 +54,10 @@ faster-whisper local (`WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE` 
 é baixado do Hugging Face no primeiro uso). Vídeos com mais de `MAX_VIDEO_DURATION_MIN` minutos são
 recusados.
 
+Cada chamada paga ao Claude, com sucesso ou não, é gravada em `llm_calls` (modelo, `usage`, código
+de erro): é a base do custo diário. Uma recusa, ou duas saídas inválidas, para o mesmo vídeo fazem
+o pipeline parar de chamar o Claude para ele até `PROMPT_VERSION` mudar.
+
 ## Checagens
 
 Os testes de banco usam um banco separado (`TEST_DATABASE_URL`, padrão

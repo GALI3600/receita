@@ -9,16 +9,18 @@ import json
 import re
 import shutil
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 from urllib.parse import parse_qs, urlsplit
 
 import yt_dlp
 from yt_dlp.networking import Request
-from yt_dlp.utils import DownloadError
+from yt_dlp.utils import DownloadCancelled, DownloadError
 
 from app.config import get_settings
 from app.errors import (
@@ -30,6 +32,7 @@ from app.errors import (
     YoutubeBlockedError,
 )
 from app.schemas.transcript import Segment
+from app.services.threads import run_cancellable
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 _YOUTUBE_HOSTS = frozenset(
@@ -44,6 +47,8 @@ _YOUTUBE_HOSTS = frozenset(
 )
 _SHORT_HOSTS = frozenset({"youtu.be", "www.youtu.be"})
 _ID_PATH_PREFIXES = frozenset({"shorts", "embed", "v", "e", "live"})
+# Tem 11 caracteres como um id, mas é o embed de playlist (embed/videoseries?list=...).
+_NOT_VIDEO_IDS = frozenset({"videoseries"})
 
 _YDL_BASE_OPTS: dict[str, Any] = {
     "quiet": True,
@@ -87,7 +92,7 @@ def extract_youtube_id(url: str) -> str:
         elif len(segments) == 2 and segments[0] in _ID_PATH_PREFIXES:
             candidate = segments[1]
 
-    if candidate is None or not _VIDEO_ID_RE.fullmatch(candidate):
+    if candidate is None or candidate in _NOT_VIDEO_IDS or not _VIDEO_ID_RE.fullmatch(candidate):
         raise InvalidUrlError(detail=f"não é link de vídeo do YouTube: {url!r}")
     return candidate
 
@@ -377,9 +382,16 @@ def parse_vtt(data: str | bytes) -> list[Segment]:
     return finalize_segments(segments)
 
 
-def _fetch_url(url: str) -> bytes:
+# Uma legenda json3 de 1 h fica em torno de 1 MB; o resto é abuso ou erro.
+MAX_SUBTITLE_BYTES = 8 * 1024 * 1024
+
+
+def _fetch_url(url: str, max_bytes: int = MAX_SUBTITLE_BYTES) -> bytes:
     with yt_dlp.YoutubeDL(_YDL_BASE_OPTS) as ydl, ydl.urlopen(Request(url)) as response:
-        return response.read()
+        data = response.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"legenda maior que {max_bytes} bytes")
+    return data
 
 
 async def download_subtitle(track: SubtitleTrack) -> list[Segment]:
@@ -394,7 +406,11 @@ async def download_subtitle(track: SubtitleTrack) -> list[Segment]:
 # --- Áudio ----------------------------------------------------------------------------------
 
 
-def _download_audio(youtube_id: str, directory: Path) -> Path:
+def _download_audio(youtube_id: str, directory: Path, cancel: threading.Event) -> Path:
+    def abort_if_cancelled(progress: dict[str, Any]) -> None:
+        if cancel.is_set():
+            raise DownloadCancelled("tarefa cancelada")
+
     opts = {
         **_YDL_BASE_OPTS,
         "skip_download": False,
@@ -402,6 +418,7 @@ def _download_audio(youtube_id: str, directory: Path) -> Path:
         "format": "bestaudio[abr<=96]/worstaudio/bestaudio",
         "outtmpl": str(directory / "%(id)s.%(ext)s"),
         "max_filesize": 300 * 1024 * 1024,
+        "progress_hooks": [abort_if_cancelled],
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         try:
@@ -417,9 +434,13 @@ def _download_audio(youtube_id: str, directory: Path) -> Path:
 
 @asynccontextmanager
 async def downloaded_audio(youtube_id: str) -> AsyncIterator[Path]:
-    """Baixa só o áudio para um diretório temporário, apagado ao sair do bloco."""
+    """Baixa só o áudio para um diretório temporário, apagado ao sair do bloco.
+
+    Se a tarefa for cancelada no meio do download, o yt-dlp é interrompido e o diretório só é
+    apagado depois que a thread parou (senão ela recriaria o arquivo depois da limpeza).
+    """
     directory = Path(tempfile.mkdtemp(prefix="receita-audio-"))
     try:
-        yield await asyncio.to_thread(_download_audio, youtube_id, directory)
+        yield await run_cancellable(partial(_download_audio, youtube_id, directory))
     finally:
         await asyncio.to_thread(shutil.rmtree, directory, True)

@@ -1,5 +1,5 @@
 from enum import StrEnum
-from typing import ClassVar
+from typing import Any, ClassVar
 
 
 class ErrorCode(StrEnum):
@@ -10,6 +10,7 @@ class ErrorCode(StrEnum):
     LIVE_VIDEO = "live_video"
     TOO_LONG = "too_long"
     NO_TRANSCRIPT = "no_transcript"
+    TRANSCRIPTION_FAILED = "transcription_failed"
     NOT_A_RECIPE = "not_a_recipe"
     LLM_MISSING_KEY = "llm_missing_key"
     LLM_REFUSED = "llm_refused"
@@ -21,19 +22,34 @@ class ErrorCode(StrEnum):
 class PipelineError(Exception):
     """Erro do domínio com código estável (gravado em Import.error_code) e mensagem para o usuário.
 
-    `detail` guarda a causa técnica para logs; nunca é exibido ao usuário.
+    `detail` guarda a causa técnica e só aparece em `repr()` (logs); `str()` traz apenas o código
+    e a mensagem. `llm_usage` vem preenchido quando a falha aconteceu depois de uma chamada paga
+    ao Claude (o uso precisa ser contabilizado mesmo sem receita).
     """
 
     code: ClassVar[ErrorCode]
     default_message: ClassVar[str]
 
-    def __init__(self, message: str | None = None, *, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: str | None = None,
+        llm_model: str | None = None,
+        llm_usage: dict[str, Any] | None = None,
+    ) -> None:
         self.message = message or self.default_message
         self.detail = detail
+        self.llm_model = llm_model
+        self.llm_usage = llm_usage
         super().__init__(self.message)
 
     def __str__(self) -> str:
-        return f"[{self.code}] {self.message}" + (f" ({self.detail})" if self.detail else "")
+        return f"[{self.code}] {self.message}"
+
+    def __repr__(self) -> str:
+        detail = f", detail={self.detail!r}" if self.detail else ""
+        return f"{type(self).__name__}(code={self.code!r}, message={self.message!r}{detail})"
 
 
 class InvalidUrlError(PipelineError):
@@ -80,6 +96,13 @@ class NoTranscriptError(PipelineError):
     default_message = (
         "Não encontramos a receita nesse vídeo: ele não tem fala que dê para transcrever "
         "e a descrição também não traz a receita."
+    )
+
+
+class TranscriptionFailedError(PipelineError):
+    code = ErrorCode.TRANSCRIPTION_FAILED
+    default_message = (
+        "Não conseguimos transcrever o áudio desse vídeo. Tente de novo em alguns minutos."
     )
 
 

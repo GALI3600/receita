@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import pytest
+from yt_dlp.utils import DownloadError
 
 from app.errors import (
     LiveVideoError,
@@ -8,8 +9,9 @@ from app.errors import (
     PipelineError,
     VideoTooLongError,
     VideoUnavailableError,
+    YoutubeBlockedError,
 )
-from app.services.youtube import VideoMetadata, validate_metadata
+from app.services.youtube import VideoMetadata, _raise_for_download_error, validate_metadata
 
 META = VideoMetadata(
     youtube_id="abcdefghijk",
@@ -59,3 +61,38 @@ def test_too_long_message_mentions_limit() -> None:
 
 def test_was_live_video_is_accepted() -> None:
     validate_metadata(replace(META, live_status="was_live"), max_duration_s=3600)
+
+
+@pytest.mark.parametrize(
+    ("message", "error"),
+    [
+        (
+            "ERROR: [youtube] abcdefghijk: Sign in to confirm you’re not a bot. "
+            "Use --cookies-from-browser or --cookies for the authentication.",
+            YoutubeBlockedError,
+        ),
+        (
+            "ERROR: unable to download video data: HTTP Error 429: Too Many Requests",
+            YoutubeBlockedError,
+        ),
+        (
+            "ERROR: [youtube] abcdefghijk: Sign in to confirm your age. "
+            "This video may be inappropriate for some users.",
+            NotEmbeddableError,
+        ),
+        ("ERROR: [youtube] abcdefghijk: This live event will begin in 3 hours.", LiveVideoError),
+        ("ERROR: [youtube] abcdefghijk: Premieres in 2 hours", LiveVideoError),
+        ("ERROR: [youtube] abcdefghijk: Video unavailable", VideoUnavailableError),
+        (
+            "ERROR: [youtube] abcdefghijk: Private video. "
+            "Sign in if you've been granted access to this video",
+            VideoUnavailableError,
+        ),
+    ],
+)
+def test_download_errors_map_to_domain_errors(message: str, error: type[PipelineError]) -> None:
+    with pytest.raises(error) as exc_info:
+        _raise_for_download_error(DownloadError(message))
+    assert exc_info.value.detail == message
+    # O texto do yt-dlp nunca vai para a mensagem nem para o str() do erro.
+    assert "ERROR" not in str(exc_info.value)
