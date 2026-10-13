@@ -2,11 +2,12 @@
 
 A receita canônica fica em `Video.generated_recipe`; cada usuário recebe uma cópia em `Recipe`
 que pode editar à vontade. Um vídeo que já tem receita com o prompt atual é copiado na hora,
-sem fila, sem transcrição e sem nova chamada ao Claude.
+sem fila, sem transcrição e sem nova chamada ao Claude (e sem gastar a cota do usuário).
 """
 
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from arq.connections import ArqRedis
@@ -17,9 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import queue
 from app.errors import AppError, QueueUnavailableError
-from app.models import ACTIVE_IMPORT_STATUSES, Import, ImportStatus, Recipe, User, Video
+from app.models import UNFINISHED_IMPORT_STATUSES, Import, ImportStatus, Recipe, User, Video
 from app.schemas.recipe_llm import RecipeLLM
-from app.services import recipe_llm, youtube
+from app.services import quotas, recipe_llm, youtube
 
 logger = logging.getLogger(__name__)
 
@@ -92,35 +93,57 @@ async def copy_recipe(session: AsyncSession, user_id: uuid.UUID, video: Video) -
     return recipe_id
 
 
+async def existing_recipe_id(
+    session: AsyncSession, user_id: uuid.UUID, youtube_id: str
+) -> uuid.UUID | None:
+    """Receita do vídeo no livro do usuário, copiando a canônica se o vídeo já está pronto.
+
+    Não faz commit.
+    """
+    recipe_id = await find_user_recipe_id(session, user_id, youtube_id)
+    if recipe_id is None:
+        video = await find_ready_video(session, youtube_id)
+        if video is not None:
+            recipe_id = await copy_recipe(session, user_id, video)
+    return recipe_id
+
+
 async def complete_from_existing(session: AsyncSession, imp: Import) -> bool:
     """Conclui o import sem processar quando o usuário já tem a receita ou o vídeo está pronto.
 
     Faz commit e devolve True se concluiu.
     """
-    recipe_id = await find_user_recipe_id(session, imp.user_id, imp.youtube_id)
-    if recipe_id is None:
-        video = await find_ready_video(session, imp.youtube_id)
-        if video is not None:
-            recipe_id = await copy_recipe(session, imp.user_id, video)
-    if recipe_id is None:
-        await session.commit()
-        return False
-    mark_done(imp, recipe_id)
+    recipe_id = await existing_recipe_id(session, imp.user_id, imp.youtube_id)
+    if recipe_id is not None:
+        mark_done(imp, recipe_id)
     await session.commit()
-    return True
+    return recipe_id is not None
 
 
-def mark_done(imp: Import, recipe_id: uuid.UUID) -> None:
+def mark_done(imp: Import, recipe_id: uuid.UUID, *, charged: bool = False) -> None:
+    """Conclui o import; `charged` quando ele gerou uma receita nova com o Claude (gasta cota)."""
     imp.status = ImportStatus.DONE
     imp.recipe_id = recipe_id
     imp.error_code = None
     imp.error_message = None
+    imp.charged_at = datetime.now(UTC) if charged else None
 
 
 def mark_failed(imp: Import, error: AppError) -> None:
     imp.status = ImportStatus.FAILED
     imp.error_code = error.code
     imp.error_message = error.message
+
+
+def mark_deferred(imp: Import) -> None:
+    imp.status = ImportStatus.DEFERRED
+    imp.error_code = None
+    imp.error_message = None
+
+
+async def _lock_user(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """Trava o usuário até o fim da transação: pedidos simultâneos dele passam um de cada vez."""
+    await session.execute(select(User.id).where(User.id == user_id).with_for_update())
 
 
 async def create_import(
@@ -130,16 +153,19 @@ async def create_import(
 
     Antes de enfileirar, tenta concluir na hora: receita já no livro do usuário, vídeo já
     processado por outra pessoa (cópia) ou um import do mesmo vídeo ainda em andamento
-    (devolve esse mesmo import).
+    (devolve esse mesmo import). Nenhum desses gasta cota; só um import que vai para a fila
+    precisa de cota livre (`QuotaExceededError`). Os pedidos do mesmo usuário são serializados
+    para que dois imports simultâneos não passem juntos do limite nem dupliquem o mesmo vídeo.
     """
     youtube_id = youtube.extract_youtube_id(url)
+    await _lock_user(session, user.id)
 
     in_flight = await session.scalar(
         select(Import)
         .where(
             Import.user_id == user.id,
             Import.youtube_id == youtube_id,
-            Import.status.in_(list(ACTIVE_IMPORT_STATUSES)),
+            Import.status.in_(list(UNFINISHED_IMPORT_STATUSES)),
         )
         .order_by(Import.created_at.desc())
         .limit(1)
@@ -149,10 +175,17 @@ async def create_import(
         return in_flight, False
 
     imp = Import(user_id=user.id, url=url.strip(), youtube_id=youtube_id)
-    session.add(imp)
-    if await complete_from_existing(session, imp):
+    recipe_id = await existing_recipe_id(session, user.id, youtube_id)
+    if recipe_id is not None:
+        mark_done(imp, recipe_id)
+        session.add(imp)
+        await session.commit()
         logger.info("import %s concluído sem fila (vídeo %s)", imp.id, youtube_id)
         return imp, False
+
+    await quotas.ensure_import_quota(session, user.id)
+    session.add(imp)
+    await session.commit()
 
     try:
         await queue.enqueue_import(redis, imp.id)

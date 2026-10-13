@@ -25,10 +25,10 @@ from app.errors import (
     TranscriptionGaveUpError,
     YoutubeBlockedError,
 )
-from app.models import Import, ImportStatus, Recipe, User, Video
+from app.models import Import, ImportStatus, LLMCall, Recipe, User, Video
 from app.schemas.recipe_llm import RecipeLLM
 from app.schemas.transcript import Segment, TranscriptSource
-from app.services import pipeline, recipe_llm, transcription, youtube
+from app.services import imports, pipeline, recipe_llm, transcription, youtube
 from app.services.locks import VideoLock
 from app.services.recipe_llm import PROMPT_VERSION, RecipeGeneration, VideoContext
 from app.services.transcription import Transcript
@@ -68,6 +68,7 @@ class FakeServices:
     metadata_error: Exception | None = None
     whisper_error: Exception | None = None
     llm_error: Exception | None = None
+    llm_recipe: dict[str, Any] = field(default_factory=lambda: GENERATED)
     llm_delay_s: float = 0
     calls: list[str] = field(default_factory=list)
     statuses: list[ImportStatus] = field(default_factory=list)
@@ -101,7 +102,7 @@ class FakeServices:
         if self.llm_error:
             raise self.llm_error
         return RecipeGeneration(
-            recipe=RecipeLLM.model_validate(GENERATED),
+            recipe=RecipeLLM.model_validate(self.llm_recipe),
             model=recipe_llm.MODEL,
             usage={"input_tokens": 100, "output_tokens": 50},
             prompt_version=PROMPT_VERSION,
@@ -761,3 +762,150 @@ async def test_video_lock(redis: ArqRedis) -> None:
     await first.release()
     assert await second.acquire()
     assert 0 < await redis.pttl(second.key) <= 60_000
+
+
+# --- Cota e orçamento -------------------------------------------------------------------------
+
+
+async def _spend_today(session: AsyncSession, usd: int) -> LLMCall:
+    """Registra uma chamada ao Claude de hoje que custou `usd` dólares (só saída, US$ 20/MTok)."""
+    video = await make_video(session, "outrovideo1")
+    call = LLMCall(
+        video_id=video.id,
+        model=recipe_llm.MODEL,
+        prompt_version=PROMPT_VERSION,
+        usage={"input_tokens": 0, "output_tokens": usd * 50_000},
+    )
+    session.add(call)
+    await session.commit()
+    return call
+
+
+async def test_new_recipe_uses_quota(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    imp = await _new_import(session)
+
+    assert await _run(ctx, imp) == "concluído"
+
+    imp = await _reload(session, imp)
+    assert imp.charged_at is not None
+    assert datetime.now(UTC) - imp.charged_at < timedelta(minutes=1)
+
+
+async def test_copy_does_not_use_quota(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    await make_video(session, YOUTUBE_ID)
+    imp = await _new_import(session)
+
+    assert await _run(ctx, imp) == "reaproveitado"
+
+    imp = await _reload(session, imp)
+    assert imp.status is ImportStatus.DONE and imp.charged_at is None
+
+
+async def test_recipe_generated_while_waiting_does_not_use_quota(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Outro import gerou a receita depois que este já tinha passado da checagem de cópia: a
+    # geração no pipeline encontra a receita pronta e não chama o Claude.
+    await make_video(session, YOUTUBE_ID)
+    imp = await _new_import(session)
+
+    async def no_copy(*args: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(imports, "complete_from_existing", no_copy)
+
+    assert await _run(ctx, imp) == "concluído"
+
+    assert "llm" not in fake.calls
+    imp = await _reload(session, imp)
+    assert imp.status is ImportStatus.DONE and imp.charged_at is None
+
+
+async def test_not_a_recipe_does_not_use_quota(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    fake.llm_recipe = {**GENERATED, "is_recipe": False, "steps": []}
+    imp = await _new_import(session)
+
+    assert await _run(ctx, imp) == "falhou: not_a_recipe"
+
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.charged_at) == (ImportStatus.FAILED, None)
+
+
+async def test_import_is_deferred_when_budget_is_over(
+    ctx: dict[str, Any],
+    session: AsyncSession,
+    fake: FakeServices,
+    redis: ArqRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "daily_llm_budget_usd", 5.0)
+    await _spend_today(session, 5)
+    imp = await _new_import(session)
+
+    assert await _run(ctx, imp) == "adiado"
+
+    assert "llm" not in fake.calls
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.error_code, imp.charged_at) == (ImportStatus.DEFERRED, None, None)
+    # O que não custa nada já ficou pronto para o dia seguinte.
+    video = await session.scalar(select(Video).where(Video.youtube_id == YOUTUBE_ID))
+    assert video is not None and video.transcript == SPEECH
+    assert await redis.keys("receita:lock:*") == []
+
+
+async def test_deferred_imports_resume_when_budget_frees_up(
+    ctx: dict[str, Any],
+    session: AsyncSession,
+    fake: FakeServices,
+    redis: ArqRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(get_settings(), "daily_llm_budget_usd", 5.0)
+    call = await _spend_today(session, 5)
+    imp = await _new_import(session)
+    await _run(ctx, imp)
+
+    assert await worker.resume_deferred_imports(ctx) == "orçamento esgotado; nada retomado"
+    assert (await _reload(session, imp)).status is ImportStatus.DEFERRED
+    assert await redis.queued_jobs() == []
+
+    # Virou o dia: o gasto de ontem não conta mais.
+    await session.execute(
+        update(LLMCall)
+        .where(LLMCall.id == call.id)
+        .values(created_at=datetime.now(UTC) - timedelta(days=1))
+    )
+    await session.commit()
+
+    assert await worker.resume_deferred_imports(ctx) == "1 retomado(s)"
+    assert (await _reload(session, imp)).status is ImportStatus.PENDING
+    assert [job.job_id for job in await redis.queued_jobs()] == [f"import:{imp.id}"]
+
+    assert await _run(ctx, imp) == "concluído"
+    imp = await _reload(session, imp)
+    assert imp.status is ImportStatus.DONE and imp.charged_at is not None
+    assert fake.calls.count("llm") == 1
+
+
+async def test_stale_recovery_leaves_deferred_imports_alone(
+    ctx: dict[str, Any], session: AsyncSession, redis: ArqRedis
+) -> None:
+    user = await make_user(session)
+    deferred = Import(user_id=user.id, url="u", youtube_id=YOUTUBE_ID, status=ImportStatus.DEFERRED)
+    session.add(deferred)
+    await session.commit()
+    await session.execute(
+        update(Import)
+        .where(Import.id == deferred.id)
+        .values(updated_at=datetime.now(UTC) - timedelta(days=1))
+    )
+    await session.commit()
+
+    assert await worker.recover_stale_imports(ctx) == "0 reenfileirado(s), 0 encerrado(s)"
+    assert (await _reload(session, deferred)).status is ImportStatus.DEFERRED

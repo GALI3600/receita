@@ -17,9 +17,11 @@ from sqlalchemy.pool import NullPool
 
 import app.models  # noqa: F401
 from app.api.deps import get_redis
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import Base, get_session
 from app.main import app as fastapi_app
+from app.services import email as email_service
+from app.services.email import Email
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TEST_DATABASE_URL = os.environ.get(
@@ -28,10 +30,22 @@ TEST_DATABASE_URL = os.environ.get(
 TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
 
 
-@pytest.fixture(autouse=True)
-def development_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Liga o login pelo header X-Dev-User-Id, que fica desligado por padrão."""
-    monkeypatch.setattr(get_settings(), "environment", "development")
+@pytest.fixture
+def settings() -> Settings:
+    """As settings do app; mude com `monkeypatch.setattr(settings, ...)` (desfeito no fim)."""
+    return get_settings()
+
+
+@pytest.fixture
+def outbox(monkeypatch: pytest.MonkeyPatch) -> list[Email]:
+    """E-mails enviados durante o teste, no lugar do backend configurado."""
+    sent: list[Email] = []
+
+    async def send(message: Email) -> None:
+        sent.append(message)
+
+    monkeypatch.setattr(email_service, "send", send)
+    return sent
 
 
 @pytest.fixture

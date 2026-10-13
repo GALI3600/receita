@@ -6,7 +6,6 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings, get_settings
 from app.models import Import, Recipe, User
 from tests.factories import GENERATED, headers, make_recipe, make_user, make_video, youtube_id
 
@@ -16,7 +15,7 @@ async def test_get_recipe_with_video(client: AsyncClient, session: AsyncSession)
     video = await make_video(session)
     recipe = await make_recipe(session, user, video, is_favorite=True)
 
-    response = await client.get(f"/recipes/{recipe.id}", headers=headers(user.id))
+    response = await client.get(f"/recipes/{recipe.id}", headers=headers(user))
 
     assert response.status_code == 200
     body = response.json()
@@ -60,7 +59,7 @@ async def test_recipe_of_another_user_is_not_found(
     recipe = await make_recipe(session, owner, await make_video(session))
 
     response = await client.request(
-        method, f"/recipes/{recipe.id}{suffix}", headers=headers(intruder.id), json=json
+        method, f"/recipes/{recipe.id}{suffix}", headers=headers(intruder), json=json
     )
 
     assert response.status_code == 404
@@ -71,49 +70,8 @@ async def test_recipe_of_another_user_is_not_found(
 
 async def test_unknown_recipe_is_not_found(client: AsyncClient, session: AsyncSession) -> None:
     user = await make_user(session)
-    response = await client.get(f"/recipes/{uuid.uuid4()}", headers=headers(user.id))
+    response = await client.get(f"/recipes/{uuid.uuid4()}", headers=headers(user))
     assert response.status_code == 404
-
-
-async def test_requires_dev_user_header(client: AsyncClient) -> None:
-    response = await client.get("/recipes")
-
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "unauthorized"
-
-
-async def test_invalid_dev_user_header(client: AsyncClient) -> None:
-    response = await client.get("/recipes", headers={"X-Dev-User-Id": "ana"})
-    assert response.status_code == 401
-
-
-async def test_dev_user_is_created_on_first_request(
-    client: AsyncClient, session: AsyncSession
-) -> None:
-    user_id = uuid.uuid4()
-
-    for _ in range(2):
-        response = await client.get("/recipes", headers=headers(user_id))
-        assert response.status_code == 200
-
-    user = await session.get(User, user_id)
-    assert user is not None and user.email == f"dev-{user_id}@receita.local"
-
-
-async def test_dev_header_is_ignored_outside_development(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(get_settings(), "environment", "production")
-
-    response = await client.get("/recipes", headers=headers(uuid.uuid4()))
-
-    assert response.status_code == 401
-
-
-def test_dev_login_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("ENVIRONMENT", raising=False)
-
-    assert Settings(_env_file=None).environment != "development"
 
 
 async def test_patch_updates_only_sent_fields(client: AsyncClient, session: AsyncSession) -> None:
@@ -123,7 +81,7 @@ async def test_patch_updates_only_sent_fields(client: AsyncClient, session: Asyn
 
     response = await client.patch(
         f"/recipes/{recipe.id}",
-        headers=headers(user.id),
+        headers=headers(user),
         json={
             "title": "  Bolo da vovó ",
             "is_favorite": True,
@@ -163,7 +121,7 @@ async def test_patch_can_clear_rating(client: AsyncClient, session: AsyncSession
     recipe = await make_recipe(session, user, await make_video(session), rating=3)
 
     response = await client.patch(
-        f"/recipes/{recipe.id}", headers=headers(user.id), json={"rating": None}
+        f"/recipes/{recipe.id}", headers=headers(user), json={"rating": None}
     )
 
     assert response.status_code == 200
@@ -198,7 +156,7 @@ async def test_patch_validation(
     user = await make_user(session)
     recipe = await make_recipe(session, user, await make_video(session))
 
-    response = await client.patch(f"/recipes/{recipe.id}", headers=headers(user.id), json=payload)
+    response = await client.patch(f"/recipes/{recipe.id}", headers=headers(user), json=payload)
 
     assert response.status_code == 422
     error = response.json()["error"]
@@ -215,10 +173,10 @@ async def test_delete_recipe(client: AsyncClient, session: AsyncSession) -> None
     session.add(imp)
     await session.commit()
 
-    response = await client.delete(f"/recipes/{recipe.id}", headers=headers(user.id))
+    response = await client.delete(f"/recipes/{recipe.id}", headers=headers(user))
     assert response.status_code == 204
 
-    response = await client.get(f"/recipes/{recipe.id}", headers=headers(user.id))
+    response = await client.get(f"/recipes/{recipe.id}", headers=headers(user))
     assert response.status_code == 404
     saved_import = await session.get(Import, imp.id, populate_existing=True)
     assert saved_import is not None and saved_import.recipe_id is None
@@ -236,10 +194,10 @@ async def test_reset_restores_generated_recipe(client: AsyncClient, session: Asy
         "rating": 4,
         "user_notes": "minha nota",
     }
-    response = await client.patch(f"/recipes/{recipe.id}", headers=headers(user.id), json=edits)
+    response = await client.patch(f"/recipes/{recipe.id}", headers=headers(user), json=edits)
     assert response.status_code == 200
 
-    response = await client.post(f"/recipes/{recipe.id}/reset", headers=headers(user.id))
+    response = await client.post(f"/recipes/{recipe.id}/reset", headers=headers(user))
 
     assert response.status_code == 200
     body = response.json()
@@ -255,7 +213,7 @@ async def test_reset_without_generated_recipe(client: AsyncClient, session: Asyn
     video.generated_recipe = None
     await session.commit()
 
-    response = await client.post(f"/recipes/{recipe.id}/reset", headers=headers(user.id))
+    response = await client.post(f"/recipes/{recipe.id}/reset", headers=headers(user))
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "no_original_recipe"
@@ -287,7 +245,7 @@ async def _book(session: AsyncSession, user: User) -> dict[str, Recipe]:
 
 
 async def _titles(client: AsyncClient, user: User, **params: Any) -> list[str]:
-    response = await client.get("/recipes", headers=headers(user.id), params=params)
+    response = await client.get("/recipes", headers=headers(user), params=params)
     assert response.status_code == 200, response.text
     return [item["title"] for item in response.json()["items"]]
 
@@ -311,7 +269,7 @@ async def test_list_item_shape(client: AsyncClient, session: AsyncSession) -> No
     user = await make_user(session)
     await make_recipe(session, user, await make_video(session))
 
-    response = await client.get("/recipes", headers=headers(user.id))
+    response = await client.get("/recipes", headers=headers(user))
 
     item = response.json()["items"][0]
     assert item["video"]["youtube_id"] == "abcdefghijk"
@@ -360,14 +318,14 @@ async def test_list_pagination(client: AsyncClient, session: AsyncSession) -> No
     user = await make_user(session)
     await _book(session, user)
 
-    first = (await client.get("/recipes", headers=headers(user.id), params={"limit": 2})).json()
+    first = (await client.get("/recipes", headers=headers(user), params={"limit": 2})).json()
     assert [i["title"] for i in first["items"]] == ["Mousse de maracujá", "Feijoada completa"]
     assert first["next_cursor"]
 
     second = (
         await client.get(
             "/recipes",
-            headers=headers(user.id),
+            headers=headers(user),
             params={"limit": 2, "cursor": first["next_cursor"]},
         )
     ).json()
@@ -378,11 +336,11 @@ async def test_list_pagination(client: AsyncClient, session: AsyncSession) -> No
 async def test_list_invalid_params(client: AsyncClient, session: AsyncSession) -> None:
     user = await make_user(session)
 
-    response = await client.get("/recipes", headers=headers(user.id), params={"cursor": "lixo"})
+    response = await client.get("/recipes", headers=headers(user), params={"cursor": "lixo"})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_cursor"
 
-    response = await client.get("/recipes", headers=headers(user.id), params={"limit": 0})
+    response = await client.get("/recipes", headers=headers(user), params={"limit": 0})
     assert response.status_code == 422
     assert response.json()["error"]["details"][0]["field"] == "query.limit"
 
@@ -404,7 +362,7 @@ async def test_forged_cursor_is_rejected(
     raw = f"{created_at}|{uuid.uuid4()}".encode()
     cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    response = await client.get("/recipes", headers=headers(user.id), params={"cursor": cursor})
+    response = await client.get("/recipes", headers=headers(user), params={"cursor": cursor})
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_cursor"
@@ -416,7 +374,7 @@ async def test_list_rejects_nul_char(
 ) -> None:
     user = await make_user(session)
 
-    response = await client.get("/recipes", headers=headers(user.id), params={param: "a\x00b"})
+    response = await client.get("/recipes", headers=headers(user), params={param: "a\x00b"})
 
     assert response.status_code == 422
     assert response.json()["error"]["details"][0]["field"] == f"query.{param}"

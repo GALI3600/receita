@@ -17,6 +17,7 @@ class ErrorCode(StrEnum):
     LLM_UNAVAILABLE = "llm_unavailable"
     LLM_INVALID_OUTPUT = "llm_invalid_output"
     LLM_ERROR = "llm_error"
+    LLM_BUDGET_EXCEEDED = "llm_budget_exceeded"
     IMPORT_TIMEOUT = "import_timeout"
     INTERNAL_ERROR = "internal_error"
     QUEUE_UNAVAILABLE = "queue_unavailable"
@@ -25,13 +26,22 @@ class ErrorCode(StrEnum):
     VALIDATION_ERROR = "validation_error"
     INVALID_CURSOR = "invalid_cursor"
     NO_ORIGINAL_RECIPE = "no_original_recipe"
+    CSRF_FAILED = "csrf_failed"
+    RATE_LIMITED = "rate_limited"
+    QUOTA_EXCEEDED = "quota_exceeded"
+    EMAIL_NOT_VERIFIED = "email_not_verified"
+    INVALID_CREDENTIALS = "invalid_credentials"
+    INVALID_PASSWORD = "invalid_password"
+    INVALID_TOKEN = "invalid_token"
+    CAPTCHA_FAILED = "captcha_failed"
+    CAPTCHA_UNAVAILABLE = "captcha_unavailable"
 
 
 class AppError(Exception):
     """Erro do domínio com código estável e mensagem para o usuário.
 
     `detail` guarda a causa técnica e só aparece em `repr()` (logs); `str()` traz apenas o código
-    e a mensagem. Na API vira `{"error": {"code", "message"}}` com `status_code`.
+    e a mensagem. Na API vira `{"error": {"code", "message"}}` com `status_code` e `headers`.
     """
 
     code: ClassVar[ErrorCode]
@@ -41,6 +51,7 @@ class AppError(Exception):
     def __init__(self, message: str | None = None, *, detail: str | None = None) -> None:
         self.message = message or self.default_message
         self.detail = detail
+        self.headers: dict[str, str] = {}
         super().__init__(self.message)
 
     def __str__(self) -> str:
@@ -176,6 +187,16 @@ class LLMError(PipelineError):
     default_message = "Algo deu errado ao escrever a receita. Tente de novo mais tarde."
 
 
+class LLMBudgetExceededError(PipelineError):
+    """O gasto do dia com o Claude chegou ao teto: o worker adia o import (status `deferred`)."""
+
+    code = ErrorCode.LLM_BUDGET_EXCEEDED
+    default_message = (
+        "Muita gente está importando receitas hoje. A sua vai ser escrita amanhã, "
+        "e o vídeo fica guardado até lá."
+    )
+
+
 class ImportTimeoutError(PipelineError):
     code = ErrorCode.IMPORT_TIMEOUT
     default_message = "O processamento desse vídeo demorou demais. Tente de novo mais tarde."
@@ -225,3 +246,71 @@ class NoOriginalRecipeError(AppError):
     code = ErrorCode.NO_ORIGINAL_RECIPE
     status_code = 409
     default_message = "A receita original desse vídeo não está disponível para restaurar."
+
+
+class CsrfError(AppError):
+    code = ErrorCode.CSRF_FAILED
+    status_code = 403
+    default_message = "Pedido bloqueado por segurança. Recarregue a página e tente de novo."
+
+
+class TooManyRequestsError(AppError):
+    """429 com `Retry-After` (segundos até poder tentar de novo)."""
+
+    status_code = 429
+
+    def __init__(
+        self, retry_after_s: int, message: str | None = None, *, detail: str | None = None
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.retry_after_s = max(1, retry_after_s)
+        self.headers["Retry-After"] = str(self.retry_after_s)
+
+
+class RateLimitedError(TooManyRequestsError):
+    code = ErrorCode.RATE_LIMITED
+    default_message = "Muitas tentativas em pouco tempo. Espere um pouco e tente de novo."
+
+
+class QuotaExceededError(TooManyRequestsError):
+    code = ErrorCode.QUOTA_EXCEEDED
+    default_message = (
+        "Você chegou ao limite de receitas novas por hoje. Amanhã tem mais; enquanto isso, "
+        "vídeos que já estão no site continuam liberados."
+    )
+
+
+class EmailNotVerifiedError(AppError):
+    code = ErrorCode.EMAIL_NOT_VERIFIED
+    status_code = 403
+    default_message = (
+        "Confirme seu e-mail para importar receitas. O link está na sua caixa de entrada."
+    )
+
+
+class InvalidCredentialsError(AppError):
+    code = ErrorCode.INVALID_CREDENTIALS
+    status_code = 401
+    default_message = "E-mail ou senha incorretos."
+
+
+class InvalidPasswordError(AppError):
+    code = ErrorCode.INVALID_PASSWORD
+    status_code = 403
+    default_message = "Senha incorreta."
+
+
+class InvalidTokenError(AppError):
+    code = ErrorCode.INVALID_TOKEN
+    default_message = "Este link é inválido ou expirou. Peça um novo."
+
+
+class CaptchaFailedError(AppError):
+    code = ErrorCode.CAPTCHA_FAILED
+    default_message = "Não conseguimos confirmar que você não é um robô. Tente de novo."
+
+
+class CaptchaUnavailableError(AppError):
+    code = ErrorCode.CAPTCHA_UNAVAILABLE
+    status_code = 503
+    default_message = "Não conseguimos checar o captcha agora. Tente de novo em alguns minutos."

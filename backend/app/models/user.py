@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import CheckConstraint, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -10,6 +10,8 @@ from app.models.enums import UserPlan
 
 class User(UUIDPrimaryKey, CreatedAt, Base):
     __tablename__ = "users"
+    # O e-mail é guardado normalizado: a unicidade não pode depender de maiúsculas.
+    __table_args__ = (CheckConstraint("email = lower(email)", name="email_lowercase"),)
 
     email: Mapped[str] = mapped_column(String(320), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))

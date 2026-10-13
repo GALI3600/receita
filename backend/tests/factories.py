@@ -1,13 +1,15 @@
 """Dados de teste: usuários, vídeos com receita gerada e cópias no livro."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import CSRF_HEADER
 from app.models import Recipe, User, Video
 from app.schemas.transcript import Segment, TranscriptSource
-from app.services import recipe_llm
+from app.services import recipe_llm, security
 from app.services.imports import recipe_fields
 
 GENERATED: dict[str, Any] = {
@@ -33,17 +35,32 @@ GENERATED: dict[str, Any] = {
 SPEECH = [Segment(start=float(i), end=i + 1.0, text="bata os ovos com o açúcar") for i in range(6)]
 
 
-def headers(user_id: uuid.UUID) -> dict[str, str]:
-    return {"X-Dev-User-Id": str(user_id)}
+# Clientes da API mandam o header anti-CSRF em todo pedido que muda estado.
+CSRF = {CSRF_HEADER: "XMLHttpRequest"}
+
+
+def headers(user: User) -> dict[str, str]:
+    """Pedido autenticado como `user`: cookie de sessão válido e header anti-CSRF."""
+    token = security.create_session_token(user.id, user.password_hash)
+    return {"Cookie": f"{security.SESSION_COOKIE}={token}", **CSRF}
 
 
 def youtube_id(n: int) -> str:
     return f"vid{n:08d}"
 
 
-async def make_user(session: AsyncSession, name: str = "Ana") -> User:
+async def make_user(
+    session: AsyncSession, name: str = "Ana", *, verified: bool = True, password_hash: str = "!"
+) -> User:
+    """Usuário sem senha utilizável (o hash "!" nunca confere); `headers(user)` loga como ele."""
     user_id = uuid.uuid4()
-    user = User(id=user_id, email=f"{user_id}@example.com", password_hash="!", name=name)
+    user = User(
+        id=user_id,
+        email=f"{user_id}@example.com",
+        password_hash=password_hash,
+        name=name,
+        email_verified_at=datetime.now(UTC) if verified else None,
+    )
     session.add(user)
     await session.commit()
     return user

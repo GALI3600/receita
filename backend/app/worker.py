@@ -8,6 +8,8 @@ varredura periódica de imports parados. O segundo atende só a fila do whisper
 (`transcribe_whisper`), com concorrência `WHISPER_MAX_JOBS` e o modelo carregado no startup.
 
 Fluxo de um import: pending → fetching → transcribing → generating → done | failed.
+Se o orçamento diário do Claude acabou, o import que precisa de receita nova fica `deferred` e
+volta para a fila no dia seguinte (`resume_deferred_imports`, logo depois da meia-noite UTC).
 Sem legenda, o import fica em `transcribing` enquanto o job do whisper (um por vídeo) roda;
 ao terminar, ele reenfileira todos os imports que esperavam aquele vídeo, que seguem para o
 Claude. As execuções do whisper são contadas no vídeo: depois de falhas que se repetiriam, novos
@@ -34,9 +36,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import queue
 from app.config import get_settings
 from app.db import SessionLocal, engine
-from app.errors import ImportTimeoutError, InternalError, PipelineError, YoutubeBlockedError
+from app.errors import (
+    ImportTimeoutError,
+    InternalError,
+    LLMBudgetExceededError,
+    PipelineError,
+    YoutubeBlockedError,
+)
 from app.models import ACTIVE_IMPORT_STATUSES, Import, ImportStatus, Video
-from app.services import imports, pipeline, transcription
+from app.services import imports, pipeline, quotas, transcription
 from app.services.locks import VideoLock
 
 logger = logging.getLogger(__name__)
@@ -132,8 +140,9 @@ async def _run_import(session: AsyncSession, redis: ArqRedis, imp: Import) -> st
             await pipeline.save_transcript(session, video, transcript)
 
     assert video is not None
-    video = await pipeline.generate(session, video, on_stage=stage)
-    imports.mark_done(imp, await imports.copy_recipe(session, imp.user_id, video))
+    video, generated = await pipeline.generate(session, video, on_stage=stage)
+    recipe_id = await imports.copy_recipe(session, imp.user_id, video)
+    imports.mark_done(imp, recipe_id, charged=generated)
     await session.commit()
     return "concluído"
 
@@ -164,6 +173,15 @@ async def _handle_failure(
     settings = get_settings()
     await session.rollback()
     error, transient = classify_failure(exc)
+
+    if isinstance(error, LLMBudgetExceededError):
+        imp = await session.get(Import, import_id, populate_existing=True)
+        if imp is None:
+            return "ignorado"
+        imports.mark_deferred(imp)
+        await session.commit()
+        logger.warning("import %s adiado: %r", import_id, error)
+        return "adiado"
 
     if transient:
         key = f"receita:import-retries:{import_id}"
@@ -306,6 +324,34 @@ async def recover_stale_imports(ctx: Ctx) -> str:
     return f"{requeued} reenfileirado(s), {failed} encerrado(s)"
 
 
+async def resume_deferred_imports(ctx: Ctx) -> str:
+    """Devolve à fila os imports adiados por falta de orçamento, se o de hoje tem folga.
+
+    Roda logo depois da meia-noite UTC (o orçamento zera) e no startup do worker (pega um
+    `DAILY_LLM_BUDGET_USD` aumentado). Os mais antigos primeiro; se o orçamento acabar de novo
+    no meio, os que sobrarem voltam a ficar adiados quando o worker chegar neles.
+    """
+    redis: ArqRedis = ctx["redis"]
+    async with ctx["sessionmaker"]() as session:
+        if not await quotas.llm_budget_available(session):
+            return "orçamento esgotado; nada retomado"
+        deferred = await session.scalars(
+            select(Import)
+            .where(Import.status == ImportStatus.DEFERRED)
+            .order_by(Import.created_at)
+            .with_for_update(skip_locked=True)
+        )
+        resumed = list(deferred.all())
+        for imp in resumed:
+            imp.status = ImportStatus.PENDING
+        await session.commit()
+    for imp in resumed:
+        await queue.enqueue_import(redis, imp.id)
+    if resumed:
+        logger.info("%d import(s) adiado(s) de volta à fila", len(resumed))
+    return f"{len(resumed)} retomado(s)"
+
+
 async def _has_job(redis: ArqRedis, imp: Import) -> bool:
     for job_id in (queue.import_job_id(imp.id), queue.resume_job_id(imp.id)):
         if await queue.job_exists(redis, job_id):
@@ -356,7 +402,8 @@ class WorkerSettings:
             minute=set(range(0, 60, 5)),
             run_at_startup=True,
             timeout=120,
-        )
+        ),
+        cron(resume_deferred_imports, hour={0}, minute={5}, run_at_startup=True, timeout=120),
     ]
     on_startup = startup
     on_shutdown = shutdown

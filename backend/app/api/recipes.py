@@ -23,7 +23,7 @@ router = APIRouter(prefix="/recipes", tags=["recipes"])
 _NOT_FOUND = {404: {"model": ErrorResponse}}
 
 # Só as colunas do vídeo que a API mostra (a transcrição pode ter centenas de KB).
-_WITH_VIDEO = joinedload(Recipe.video).load_only(
+WITH_VIDEO = joinedload(Recipe.video).load_only(
     Video.youtube_id, Video.title, Video.channel, Video.thumbnail_url, Video.duration_s
 )
 
@@ -70,7 +70,7 @@ def _decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
 
 
 def _user_recipes(user: User) -> Select[tuple[Recipe]]:
-    return select(Recipe).where(Recipe.user_id == user.id).options(_WITH_VIDEO)
+    return select(Recipe).where(Recipe.user_id == user.id).options(WITH_VIDEO)
 
 
 async def _get_recipe(session: AsyncSession, user: User, recipe_id: uuid.UUID) -> Recipe:

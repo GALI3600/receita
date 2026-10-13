@@ -174,8 +174,9 @@ Recipe   (id, user_id → User, video_id → Video,
           UNIQUE (user_id, video_id)
 
 Import   (id, user_id, url, youtube_id,
-          status: pending|fetching|transcribing|generating|done|failed,
+          status: pending|fetching|transcribing|generating|done|failed|deferred,
           error_code, error_message, recipe_id → Recipe,
+          charged_at,                      # gerou receita nova com o Claude (conta na cota)
           created_at, updated_at)
 ```
 
@@ -192,9 +193,12 @@ Import   (id, user_id, url, youtube_id,
 |---|---|---|
 | POST | `/auth/register` | Cadastro (envia e-mail de verificação) |
 | POST | `/auth/verify` | Confirma o e-mail via token |
+| POST | `/auth/resend-verification` | Reenvia o link de confirmação |
 | POST | `/auth/login`, `/auth/logout` | Sessão |
 | POST | `/auth/forgot-password`, `/auth/reset-password` | Recuperação de senha |
 | GET | `/auth/me` | Usuário logado + uso da cota |
+| GET | `/account/export` | Exporta os dados da conta (LGPD) |
+| DELETE | `/account` | Apaga a conta (exige a senha) |
 | POST | `/imports` `{url}` | Valida, checa cota, enfileira; retorna `{id, status}` |
 | GET | `/imports/{id}` | Status/etapa atual e `recipe_id` ao terminar |
 | GET | `/recipes?q=&tag=&favorite=` | Lista o livro do usuário (busca/filtros, paginado) |
@@ -227,7 +231,7 @@ Cada receita nova custa dinheiro (Claude) e CPU (whisper). Com cadastro aberto, 
 - **Cota por usuário:** por exemplo 10 imports novos por dia. Vídeos já processados (cópia) e falhas não consomem a cota.
 - **Rate limit por IP** em cadastro, login e imports, para evitar contas em massa e força bruta.
 - **CAPTCHA** (Cloudflare Turnstile) no cadastro.
-- **Orçamento global:** o gasto diário com o Claude, somado a partir de `llm_usage`, tem um teto. Ao atingir o teto, novos vídeos ficam na fila para o dia seguinte e os vídeos já processados continuam funcionando.
+- **Orçamento global:** o gasto diário com o Claude, somado a partir do `usage` de cada chamada (tabela `llm_calls`), tem um teto. Ao atingir o teto, novos vídeos ficam com status `deferred` e voltam para a fila no dia seguinte; os vídeos já processados continuam funcionando.
 - **Duração máxima** do vídeo, para limitar o tempo de whisper.
 - **Senhas** com hash argon2; **LGPD:** permitir exportar e apagar a conta.
 

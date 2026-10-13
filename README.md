@@ -12,7 +12,7 @@ Plano completo do projeto: [`docs/PLANO.md`](docs/PLANO.md).
 ## Rodando com Docker
 
 ```bash
-cp backend/.env.example backend/.env   # preencha ANTHROPIC_API_KEY
+cp backend/.env.example backend/.env   # preencha ANTHROPIC_API_KEY (e SECRET_KEY fora de development)
 docker compose up --build
 ```
 
@@ -22,7 +22,8 @@ docker compose up --build
 O serviço `migrate` roda `alembic upgrade head` e sai; a API e os workers só sobem depois dele.
 Os imports são processados em segundo plano por dois workers [arq](https://arq-docs.helpmanual.io/):
 
-- `worker`: fila padrão (metadados, legendas, Claude) e varredura de imports parados;
+- `worker`: fila padrão (metadados, legendas, Claude), varredura de imports parados e retomada dos
+  imports adiados pelo orçamento;
 - `worker-whisper`: só a transcrição com faster-whisper, `WHISPER_MAX_JOBS` por vez (padrão 1). O
   modelo é carregado quando o worker inicia e fica no volume `hf-cache`.
 
@@ -49,8 +50,18 @@ npm run dev
 
 | Método | Rota | |
 |---|---|---|
-| POST | `/imports` `{url}` | Valida o link e enfileira (202). Se a receita já existe (no livro ou de outro usuário), conclui na hora (200) |
-| GET | `/imports/{id}` | `status` (`pending` → `fetching` → `transcribing` → `generating` → `done`/`failed`), `recipe_id`, `error` e `queue_position` |
+| POST | `/auth/register` `{name, email, password}` | Cria a conta e manda o link de confirmação (202). Resposta igual se o e-mail já tem conta |
+| POST | `/auth/verify` `{token}` | Confirma o e-mail (204) |
+| POST | `/auth/resend-verification` | Reenvia o link de confirmação (logado) |
+| POST | `/auth/login` `{email, password}` | Abre a sessão (cookie `receita_session`) e devolve o mesmo que `/auth/me` |
+| POST | `/auth/logout` | Encerra a sessão (204) |
+| POST | `/auth/forgot-password` `{email}` | Manda o link de redefinição se houver conta; sempre 200 |
+| POST | `/auth/reset-password` `{token, password}` | Troca a senha (link de uso único) e encerra todas as sessões (204) |
+| GET | `/auth/me` | Usuário + cota do dia (`quota.used`, `limit`, `remaining`, `resets_at`) |
+| GET | `/account/export` | Todos os dados da conta em JSON (LGPD) |
+| DELETE | `/account` `{password}` | Apaga a conta, as receitas e os imports (204). Os vídeos compartilhados ficam |
+| POST | `/imports` `{url}` | Valida o link e enfileira (202). Se a receita já existe (no livro ou de outro usuário), conclui na hora (200). Exige e-mail confirmado |
+| GET | `/imports/{id}` | `status` (`pending` → `fetching` → `transcribing` → `generating` → `done`/`failed`, ou `deferred`), `recipe_id`, `error` e `queue_position` |
 | GET | `/recipes?q=&tag=&favorite=&limit=&cursor=` | Livro do usuário, mais recentes primeiro; `q` busca no título, ingredientes e tags, sem diferenciar acentos |
 | GET | `/recipes/{id}` | Receita + vídeo (`youtube_id`, título, canal, thumbnail, duração) |
 | PATCH | `/recipes/{id}` | Edita os campos enviados, `is_favorite`, `user_notes` e `rating` (1–5) |
@@ -60,13 +71,42 @@ npm run dev
 Erros sempre no formato `{"error": {"code": "...", "message": "..."}}`; erros de validação trazem
 também `details`.
 
-**Usuário (temporário, até a fase 3):** com `ENVIRONMENT=development`, o usuário vem do header
-`X-Dev-User-Id` (um UUID qualquer) e é criado na primeira requisição. O padrão é `production`, em
-que as rotas respondem 401: o `docker-compose.yml` e o `.env.example` ligam o modo de
-desenvolvimento.
+### Sessão e segurança
+
+- **Sessão:** JWT (HS256, `SECRET_KEY`) num cookie `httpOnly`, `SameSite=Lax`, `Secure` fora de
+  development, válido por `SESSION_TTL_DAYS`. Sair grava a sessão como revogada no Redis; trocar a
+  senha derruba todas as sessões. Senhas com argon2.
+- **CSRF:** todo `POST`/`PATCH`/`PUT`/`DELETE` precisa do header `X-Requested-With` (qualquer
+  valor); se o pedido tiver `Origin`, ela precisa estar em `CORS_ORIGINS`. Sem isso: 403
+  `csrf_failed`.
+- **E-mail:** com `EMAIL_BACKEND=console` (padrão em development) o e-mail, com o link, aparece no
+  log da API (`docker compose logs api`); `smtp` envia de verdade. Os links apontam para
+  `FRONTEND_URL` (`/verificar-email?token=...`, `/redefinir-senha?token=...`).
+- **Captcha:** com `TURNSTILE_SECRET_KEY`, o cadastro exige o token do Cloudflare Turnstile em
+  `cf-turnstile-response`.
+
+### Limites
+
+- **Rate limit por IP** (Redis, janela fixa) em cadastro, login, "esqueci a senha", reenvio do
+  link e `POST /imports`: 429 `rate_limited` com `Retry-After`. Valores em `RATE_LIMIT_*`; o
+  `X-Forwarded-For` só vale com `TRUST_PROXY_HEADERS=true`.
+- **Cota por usuário:** `DAILY_IMPORT_LIMIT` receitas novas por dia UTC (padrão 10). Só conta o
+  import que chamou o Claude e terminou `done`; cópias e falhas não contam. Imports em andamento
+  ocupam a vaga enquanto não terminam. Estourou: 429 `quota_exceeded` com `Retry-After`.
+- **Orçamento global:** quando o gasto do dia com o Claude (calculado do `usage` de cada chamada)
+  chega a `DAILY_LLM_BUDGET_USD`, vídeos novos ficam `deferred` e voltam para a fila depois da
+  meia-noite UTC (cron do worker). Cópias continuam funcionando.
 
 ```bash
-curl -X POST localhost:8000/imports -H "X-Dev-User-Id: $(uuidgen)" \
+# cadastro → link no log → confirmação → login → import
+curl -X POST localhost:8000/auth/register -H 'X-Requested-With: curl' \
+  -H 'Content-Type: application/json' -d '{"name": "Ana", "email": "ana@example.com", "password": "uma-senha-boa"}'
+docker compose logs api | grep verificar-email
+curl -X POST localhost:8000/auth/verify -H 'X-Requested-With: curl' \
+  -H 'Content-Type: application/json' -d '{"token": "<token do link>"}'
+curl -c cookies.txt -X POST localhost:8000/auth/login -H 'X-Requested-With: curl' \
+  -H 'Content-Type: application/json' -d '{"email": "ana@example.com", "password": "uma-senha-boa"}'
+curl -b cookies.txt -X POST localhost:8000/imports -H 'X-Requested-With: curl' \
   -H 'Content-Type: application/json' -d '{"url": "https://youtu.be/<id>"}'
 ```
 

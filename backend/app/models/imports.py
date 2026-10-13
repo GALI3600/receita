@@ -1,6 +1,7 @@
 import uuid
+from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -18,6 +19,13 @@ class Import(UUIDPrimaryKey, Timestamps, Base):
             "updated_at",
             postgresql_where=text("status NOT IN ('done', 'failed')"),
         ),
+        # Cota diária: imports concluídos que geraram receita nova com o Claude.
+        Index(
+            "ix_imports_user_id_charged_at",
+            "user_id",
+            "charged_at",
+            postgresql_where=text("charged_at IS NOT NULL"),
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
@@ -33,3 +41,6 @@ class Import(UUIDPrimaryKey, Timestamps, Base):
     recipe_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("recipes.id", ondelete="SET NULL")
     )
+    # Quando o import terminou com uma receita nova gerada pelo Claude (só esses gastam a cota);
+    # nulo para cópias, falhas e imports ainda em andamento.
+    charged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -21,12 +21,17 @@ _HTTP_ERRORS: dict[int, tuple[ErrorCode, str]] = {
 
 
 def error_response(
-    status_code: int, code: str, message: str, details: list[FieldError] | None = None
+    status_code: int,
+    code: str,
+    message: str,
+    details: list[FieldError] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     body = ErrorResponse(error=ErrorBody(code=code, message=message, details=details))
     return JSONResponse(
         status_code=status_code,
         content=jsonable_encoder(body, exclude_none=True),
+        headers=headers,
     )
 
 
@@ -34,7 +39,7 @@ async def _app_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, AppError)
     if exc.status_code >= 500:
         logger.error("%s %s: %r", request.method, request.url.path, exc)
-    return error_response(exc.status_code, exc.code, exc.message)
+    return error_response(exc.status_code, exc.code, exc.message, headers=exc.headers or None)
 
 
 async def _validation_error(request: Request, exc: Exception) -> JSONResponse:

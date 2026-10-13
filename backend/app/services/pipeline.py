@@ -24,7 +24,7 @@ from app.errors import (
     YoutubeBlockedError,
 )
 from app.models import ImportStatus, LLMCall, Video
-from app.services import recipe_llm, transcription, youtube
+from app.services import quotas, recipe_llm, transcription, youtube
 from app.services.youtube import VideoMetadata
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,8 @@ async def process_video(
 
     if skip_llm:
         return video
-    return await generate(session, video, on_stage=on_stage)
+    video, _ = await generate(session, video, on_stage=on_stage)
+    return video
 
 
 async def find_video(session: AsyncSession, youtube_id: str) -> Video | None:
@@ -117,19 +118,23 @@ async def save_transcript(
 
 async def generate(
     session: AsyncSession, video: Video, *, on_stage: StageCallback | None = None
-) -> Video:
+) -> tuple[Video, bool]:
     """Gera a receita canônica com o Claude, se ainda não houver uma com o prompt atual.
 
-    Levanta `NotARecipeError`/`NoTranscriptError` quando o vídeo não traz receita.
+    Devolve o vídeo e se esta chamada gerou uma receita nova (só essas gastam a cota do
+    usuário). Levanta `NotARecipeError`/`NoTranscriptError` quando o vídeo não traz receita e
+    `LLMBudgetExceededError` quando o orçamento do dia acabou e a receita ainda não existe.
     """
     if video.transcript is None:
         raise ValueError(f"vídeo {video.youtube_id} ainda não foi transcrito")
 
     has_speech = transcription.is_useful_transcript(video.transcript, video.duration_s)
-    if video.generated_recipe is None or video.prompt_version != recipe_llm.PROMPT_VERSION:
+    generated = video.generated_recipe is None or video.prompt_version != recipe_llm.PROMPT_VERSION
+    if generated:
         if not has_speech and len(video.description.split()) < MIN_DESCRIPTION_WORDS:
             raise NoTranscriptError(detail="sem fala útil e descrição curta")
         await _raise_if_llm_gave_up(session, video)
+        await quotas.ensure_llm_budget(session)
 
         if on_stage is not None:
             await on_stage(ImportStatus.GENERATING)
@@ -163,7 +168,7 @@ async def generate(
         if not has_speech:
             raise NoTranscriptError(detail="sem fala útil e a descrição não traz a receita")
         raise NotARecipeError(detail=video.generated_recipe.get("summary"))
-    return video
+    return video, generated
 
 
 async def _get_video(session: AsyncSession, youtube_id: str) -> Video | None:

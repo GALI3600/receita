@@ -3,7 +3,7 @@ import uuid
 from fastapi import APIRouter, Response, status
 from sqlalchemy import select
 
-from app.api.deps import CurrentUser, RedisDep, SessionDep
+from app.api.deps import CurrentUser, RedisDep, SessionDep, VerifiedUser, ip_rate_limit
 from app.errors import ImportNotFoundError
 from app.models import Import
 from app.schemas.errors import ErrorResponse
@@ -17,20 +17,27 @@ router = APIRouter(prefix="/imports", tags=["imports"])
     "",
     response_model=ImportOut,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[ip_rate_limit("imports", lambda s: s.rate_limit_imports)],
     responses={
         200: {"model": ImportOut, "description": "Concluído na hora (receita já disponível)"},
+        401: {"model": ErrorResponse},
+        403: {"model": ErrorResponse, "description": "E-mail ainda não confirmado"},
         422: {"model": ErrorResponse},
+        429: {"model": ErrorResponse, "description": "Rate limit ou cota do dia esgotada"},
         503: {"model": ErrorResponse},
     },
 )
 async def create_import(
     body: ImportCreate,
-    user: CurrentUser,
+    user: VerifiedUser,
     session: SessionDep,
     redis: RedisDep,
     response: Response,
 ) -> ImportOut:
-    """Valida o link e enfileira o vídeo. Se a receita já existe, conclui na hora (200)."""
+    """Valida o link e enfileira o vídeo. Se a receita já existe, conclui na hora (200).
+
+    Só vídeos que vão para a fila precisam de cota livre; cópias são sempre liberadas.
+    """
     imp, queued = await imports.create_import(session, redis, user, body.url)
     if not queued:
         response.status_code = status.HTTP_200_OK

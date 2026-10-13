@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import queue
 from app.models import Import, ImportStatus, Recipe
-from tests.factories import GENERATED, headers, make_recipe, make_user, make_video
+from tests.factories import CSRF, GENERATED, headers, make_recipe, make_user, make_video
 
 URL = "https://youtu.be/abcdefghijk?si=xyz"
 
@@ -28,7 +28,7 @@ async def test_new_video_is_queued(
 ) -> None:
     user = await make_user(session)
 
-    response = await client.post("/imports", headers=headers(user.id), json={"url": URL})
+    response = await client.post("/imports", headers=headers(user), json={"url": URL})
 
     assert response.status_code == 202
     body = response.json()
@@ -52,7 +52,7 @@ async def test_invalid_url_is_rejected_without_queueing(
     user = await make_user(session)
 
     response = await client.post(
-        "/imports", headers=headers(user.id), json={"url": "https://vimeo.com/123"}
+        "/imports", headers=headers(user), json={"url": "https://vimeo.com/123"}
     )
 
     assert response.status_code == 422
@@ -71,7 +71,7 @@ async def test_missing_url_is_a_validation_error(
 ) -> None:
     user = await make_user(session)
 
-    response = await client.post("/imports", headers=headers(user.id), json={})
+    response = await client.post("/imports", headers=headers(user), json={})
 
     assert response.status_code == 422
     assert response.json()["error"]["details"][0]["field"] == "body.url"
@@ -84,7 +84,7 @@ async def test_url_with_nul_char_is_a_validation_error(
 
     # O id extraído é válido; o NUL só quebraria na gravação de `Import.url`.
     response = await client.post(
-        "/imports", headers=headers(user.id), json={"url": "https://youtu.be/abcdefghijk?si=a\x00b"}
+        "/imports", headers=headers(user), json={"url": "https://youtu.be/abcdefghijk?si=a\x00b"}
     )
 
     assert response.status_code == 422
@@ -101,7 +101,7 @@ async def test_recipe_already_in_book_returns_it(
 
     response = await client.post(
         "/imports",
-        headers=headers(user.id),
+        headers=headers(user),
         json={"url": "https://www.youtube.com/watch?v=abcdefghijk"},
     )
 
@@ -121,7 +121,7 @@ async def test_processed_video_is_copied_right_away(
     video = await make_video(session)
     await make_recipe(session, owner, video, title="Editada pela dona")
 
-    response = await client.post("/imports", headers=headers(user.id), json={"url": URL})
+    response = await client.post("/imports", headers=headers(user), json={"url": URL})
 
     assert response.status_code == 200
     body = response.json()
@@ -150,7 +150,7 @@ async def test_video_without_usable_recipe_is_queued(
     user = await make_user(session)
     await make_video(session, **video_kwargs)
 
-    response = await client.post("/imports", headers=headers(user.id), json={"url": URL})
+    response = await client.post("/imports", headers=headers(user), json={"url": URL})
 
     assert response.status_code == 202
     assert len(await _queued(redis)) == 1
@@ -162,13 +162,13 @@ async def test_same_video_twice_reuses_import_in_progress(
 ) -> None:
     user, other = await make_user(session), await make_user(session, "Bia")
 
-    first = await client.post("/imports", headers=headers(user.id), json={"url": URL})
+    first = await client.post("/imports", headers=headers(user), json={"url": URL})
     again = await client.post(
         "/imports",
-        headers=headers(user.id),
+        headers=headers(user),
         json={"url": "https://youtube.com/shorts/abcdefghijk"},
     )
-    from_other = await client.post("/imports", headers=headers(other.id), json={"url": URL})
+    from_other = await client.post("/imports", headers=headers(other), json={"url": URL})
 
     assert again.status_code == 200
     assert again.json()["id"] == first.json()["id"]
@@ -191,7 +191,7 @@ async def test_queue_down_fails_import(
 
     monkeypatch.setattr(queue, "enqueue_import", broken)
 
-    response = await client.post("/imports", headers=headers(user.id), json={"url": URL})
+    response = await client.post("/imports", headers=headers(user), json={"url": URL})
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "queue_unavailable"
@@ -202,9 +202,9 @@ async def test_queue_down_fails_import(
 
 async def test_get_import(client: AsyncClient, session: AsyncSession, redis: ArqRedis) -> None:
     user = await make_user(session)
-    created = (await client.post("/imports", headers=headers(user.id), json={"url": URL})).json()
+    created = (await client.post("/imports", headers=headers(user), json={"url": URL})).json()
 
-    response = await client.get(f"/imports/{created['id']}", headers=headers(user.id))
+    response = await client.get(f"/imports/{created['id']}", headers=headers(user))
 
     assert response.status_code == 200
     assert response.json() == created
@@ -223,7 +223,7 @@ async def test_get_failed_import_shows_error(client: AsyncClient, session: Async
     session.add(imp)
     await session.commit()
 
-    response = await client.get(f"/imports/{imp.id}", headers=headers(user.id))
+    response = await client.get(f"/imports/{imp.id}", headers=headers(user))
 
     body = response.json()
     assert body["status"] == "failed"
@@ -243,7 +243,7 @@ async def test_get_import_in_whisper_queue_shows_position(
     session.add(imp)
     await session.commit()
 
-    response = await client.get(f"/imports/{imp.id}", headers=headers(user.id))
+    response = await client.get(f"/imports/{imp.id}", headers=headers(user))
 
     assert response.json()["queue_position"] == 2
 
@@ -252,9 +252,9 @@ async def test_import_of_another_user_is_not_found(
     client: AsyncClient, session: AsyncSession
 ) -> None:
     owner, intruder = await make_user(session), await make_user(session, "Bia")
-    created = (await client.post("/imports", headers=headers(owner.id), json={"url": URL})).json()
+    created = (await client.post("/imports", headers=headers(owner), json={"url": URL})).json()
 
-    response = await client.get(f"/imports/{created['id']}", headers=headers(intruder.id))
+    response = await client.get(f"/imports/{created['id']}", headers=headers(intruder))
 
     assert response.status_code == 404
     assert response.json()["error"] == {
@@ -264,5 +264,5 @@ async def test_import_of_another_user_is_not_found(
 
 
 async def test_imports_require_user(client: AsyncClient) -> None:
-    response = await client.post("/imports", json={"url": URL})
+    response = await client.post("/imports", headers=CSRF, json={"url": URL})
     assert response.status_code == 401
