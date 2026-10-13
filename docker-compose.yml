@@ -1,3 +1,24 @@
+x-backend: &backend
+  build: ./backend
+  env_file:
+    - path: ./backend/.env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+asyncpg://receita:receita@db:5432/receita
+    REDIS_URL: redis://redis:6379/0
+
+x-backend-volumes: &backend-volumes
+  - ./backend/app:/app/app
+  - ./backend/alembic:/app/alembic
+
+x-after-migrate: &after-migrate
+  db:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
 services:
   db:
     image: postgres:17-alpine
@@ -25,25 +46,39 @@ services:
       timeout: 3s
       retries: 10
 
-  api:
-    build: ./backend
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    env_file:
-      - path: ./backend/.env
-        required: false
-    environment:
-      DATABASE_URL: postgresql+asyncpg://receita:receita@db:5432/receita
-      REDIS_URL: redis://redis:6379/0
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend/app:/app/app
-      - ./backend/alembic:/app/alembic
+  # Aplica as migrações e sai; api e workers só sobem depois que ele termina com sucesso.
+  migrate:
+    <<: *backend
+    command: alembic upgrade head
+    volumes: *backend-volumes
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+
+  api:
+    <<: *backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes: *backend-volumes
+    depends_on: *after-migrate
+
+  # Fila padrão: metadados, legendas e Claude.
+  worker:
+    <<: *backend
+    command: >-
+      arq app.worker.WorkerSettings --custom-log-dict app.worker.LOG_CONFIG --watch app
+    volumes: *backend-volumes
+    depends_on: *after-migrate
+
+  # Fila do whisper (WHISPER_MAX_JOBS por vez); o modelo é baixado uma vez para o volume.
+  worker-whisper:
+    <<: *backend
+    command: arq app.worker.WhisperWorkerSettings --custom-log-dict app.worker.LOG_CONFIG
+    volumes:
+      - ./backend/app:/app/app
+      - hf-cache:/root/.cache/huggingface
+    depends_on: *after-migrate
 
   frontend:
     build: ./frontend
@@ -59,3 +94,4 @@ services:
 
 volumes:
   pgdata:
+  hf-cache:

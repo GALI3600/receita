@@ -62,9 +62,14 @@ async def transcribe(meta: VideoMetadata) -> Transcript:
         return transcript
 
     logger.info("vídeo %s sem legenda com texto; transcrevendo com whisper", meta.youtube_id)
-    async with youtube.downloaded_audio(meta.youtube_id) as audio_path:
+    return await transcribe_with_whisper(meta.youtube_id, meta.language)
+
+
+async def transcribe_with_whisper(youtube_id: str, language: str | None) -> Transcript:
+    """Baixa o áudio para um diretório temporário, transcreve localmente e apaga o áudio."""
+    async with youtube.downloaded_audio(youtube_id) as audio_path:
         try:
-            segments = await run_cancellable(partial(whisper_transcribe, audio_path, meta.language))
+            segments = await run_cancellable(partial(whisper_transcribe, audio_path, language))
         except Exception as exc:
             raise TranscriptionFailedError(detail=f"whisper: {type(exc).__name__}: {exc}") from exc
     return Transcript(segments, TranscriptSource.WHISPER)
@@ -122,6 +127,8 @@ def get_whisper_model() -> "WhisperModel":
                     settings.whisper_model,
                     device=settings.whisper_device,
                     compute_type=settings.whisper_compute_type,
+                    # Um worker interno por job simultâneo: sem isso as chamadas se enfileiram.
+                    num_workers=settings.whisper_max_jobs,
                 )
     return _whisper_model
 

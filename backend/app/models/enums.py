@@ -18,3 +18,13 @@ class ImportStatus(StrEnum):
     GENERATING = "generating"
     DONE = "done"
     FAILED = "failed"
+
+
+ACTIVE_IMPORT_STATUSES = frozenset(
+    {
+        ImportStatus.PENDING,
+        ImportStatus.FETCHING,
+        ImportStatus.TRANSCRIBING,
+        ImportStatus.GENERATING,
+    }
+)

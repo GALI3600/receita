@@ -17,18 +17,50 @@ class ErrorCode(StrEnum):
     LLM_UNAVAILABLE = "llm_unavailable"
     LLM_INVALID_OUTPUT = "llm_invalid_output"
     LLM_ERROR = "llm_error"
+    IMPORT_TIMEOUT = "import_timeout"
+    INTERNAL_ERROR = "internal_error"
+    QUEUE_UNAVAILABLE = "queue_unavailable"
+    UNAUTHORIZED = "unauthorized"
+    NOT_FOUND = "not_found"
+    VALIDATION_ERROR = "validation_error"
+    INVALID_CURSOR = "invalid_cursor"
+    NO_ORIGINAL_RECIPE = "no_original_recipe"
 
 
-class PipelineError(Exception):
-    """Erro do domínio com código estável (gravado em Import.error_code) e mensagem para o usuário.
+class AppError(Exception):
+    """Erro do domínio com código estável e mensagem para o usuário.
 
     `detail` guarda a causa técnica e só aparece em `repr()` (logs); `str()` traz apenas o código
-    e a mensagem. `llm_usage` vem preenchido quando a falha aconteceu depois de uma chamada paga
-    ao Claude (o uso precisa ser contabilizado mesmo sem receita).
+    e a mensagem. Na API vira `{"error": {"code", "message"}}` com `status_code`.
     """
 
     code: ClassVar[ErrorCode]
     default_message: ClassVar[str]
+    status_code: ClassVar[int] = 400
+
+    def __init__(self, message: str | None = None, *, detail: str | None = None) -> None:
+        self.message = message or self.default_message
+        self.detail = detail
+        super().__init__(self.message)
+
+    def __str__(self) -> str:
+        return f"[{self.code}] {self.message}"
+
+    def __repr__(self) -> str:
+        detail = f", detail={self.detail!r}" if self.detail else ""
+        return f"{type(self).__name__}(code={self.code!r}, message={self.message!r}{detail})"
+
+
+class PipelineError(AppError):
+    """Falha do processamento de um vídeo, gravada em `Import.error_code`/`error_message`.
+
+    `llm_usage` vem preenchido quando a falha aconteceu depois de uma chamada paga ao Claude (o
+    uso precisa ser contabilizado mesmo sem receita). `transient` marca as falhas que podem
+    passar sozinhas: só essas são tentadas de novo pelo worker.
+    """
+
+    status_code = 422
+    transient: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -38,18 +70,9 @@ class PipelineError(Exception):
         llm_model: str | None = None,
         llm_usage: dict[str, Any] | None = None,
     ) -> None:
-        self.message = message or self.default_message
-        self.detail = detail
+        super().__init__(message, detail=detail)
         self.llm_model = llm_model
         self.llm_usage = llm_usage
-        super().__init__(self.message)
-
-    def __str__(self) -> str:
-        return f"[{self.code}] {self.message}"
-
-    def __repr__(self) -> str:
-        detail = f", detail={self.detail!r}" if self.detail else ""
-        return f"{type(self).__name__}(code={self.code!r}, message={self.message!r}{detail})"
 
 
 class InvalidUrlError(PipelineError):
@@ -66,6 +89,7 @@ class VideoUnavailableError(PipelineError):
 
 class YoutubeBlockedError(PipelineError):
     code = ErrorCode.YOUTUBE_BLOCKED
+    transient = True
     default_message = (
         "O YouTube bloqueou temporariamente o acesso ao vídeo. Tente de novo em alguns minutos."
     )
@@ -101,6 +125,7 @@ class NoTranscriptError(PipelineError):
 
 class TranscriptionFailedError(PipelineError):
     code = ErrorCode.TRANSCRIPTION_FAILED
+    transient = True
     default_message = (
         "Não conseguimos transcrever o áudio desse vídeo. Tente de novo em alguns minutos."
     )
@@ -125,6 +150,7 @@ class LLMRefusedError(PipelineError):
 
 class LLMUnavailableError(PipelineError):
     code = ErrorCode.LLM_UNAVAILABLE
+    transient = True
     default_message = (
         "O serviço que escreve as receitas está indisponível no momento. "
         "Tente de novo em alguns minutos."
@@ -139,3 +165,54 @@ class LLMInvalidOutputError(PipelineError):
 class LLMError(PipelineError):
     code = ErrorCode.LLM_ERROR
     default_message = "Algo deu errado ao escrever a receita. Tente de novo mais tarde."
+
+
+class ImportTimeoutError(PipelineError):
+    code = ErrorCode.IMPORT_TIMEOUT
+    default_message = "O processamento desse vídeo demorou demais. Tente de novo mais tarde."
+
+
+class InternalError(PipelineError):
+    code = ErrorCode.INTERNAL_ERROR
+    status_code = 500
+    default_message = "Algo deu errado do nosso lado. Tente de novo em alguns minutos."
+
+
+class QueueUnavailableError(AppError):
+    code = ErrorCode.QUEUE_UNAVAILABLE
+    status_code = 503
+    default_message = (
+        "Não conseguimos colocar o vídeo na fila agora. Tente de novo em alguns minutos."
+    )
+
+
+class UnauthorizedError(AppError):
+    code = ErrorCode.UNAUTHORIZED
+    status_code = 401
+    default_message = "Entre na sua conta para continuar."
+
+
+class NotFoundError(AppError):
+    code = ErrorCode.NOT_FOUND
+    status_code = 404
+    default_message = "Não encontramos o que você procurou."
+
+
+class RecipeNotFoundError(NotFoundError):
+    default_message = "Receita não encontrada."
+
+
+class ImportNotFoundError(NotFoundError):
+    default_message = "Importação não encontrada."
+
+
+class InvalidCursorError(AppError):
+    code = ErrorCode.INVALID_CURSOR
+    status_code = 422
+    default_message = "A página pedida não é válida. Recarregue a lista."
+
+
+class NoOriginalRecipeError(AppError):
+    code = ErrorCode.NO_ORIGINAL_RECIPE
+    status_code = 409
+    default_message = "A receita original desse vídeo não está disponível para restaurar."

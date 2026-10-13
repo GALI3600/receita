@@ -47,11 +47,12 @@ async def process_video(
     skip_llm: bool = False,
     on_stage: StageCallback | None = None,
 ) -> Video:
-    """Processa o vídeo e devolve o `Video` com transcrição e receita gerada.
+    """Processa o vídeo de ponta a ponta e devolve o `Video` com transcrição e receita gerada.
 
     Levanta `PipelineError` (app.errors) com código estável em qualquer falha do domínio.
     A sessão precisa ter `expire_on_commit=False` (como `SessionLocal`): toda leitura termina
     com commit para que nenhuma transação fique aberta durante yt-dlp, whisper ou Claude.
+    O worker usa as mesmas etapas separadamente, para mandar o whisper para a fila dele.
     """
 
     async def stage(status: ImportStatus) -> None:
@@ -59,32 +60,63 @@ async def process_video(
             await on_stage(status)
 
     youtube_id = youtube.extract_youtube_id(url)
-    video = await _get_video(session, youtube_id)
-    await session.commit()
-
     await stage(ImportStatus.FETCHING)
-    if video is not None and video.transcript is not None:
-        await _revalidate(session, video)
-        logger.info("vídeo %s já transcrito; reaproveitando", youtube_id)
-    else:
-        meta = await youtube.fetch_metadata(youtube_id)
-        youtube.validate_metadata(meta)
-        video = await _save_metadata(session, video, meta)
-
+    video, meta = await fetch_video(session, youtube_id)
+    if meta is not None:
         await stage(ImportStatus.TRANSCRIBING)
-        transcript = await transcription.transcribe(meta)
-        video.transcript = transcript.segments
-        video.transcript_source = transcript.source
-        await session.commit()
-        logger.info(
-            "vídeo %s transcrito (%s, %d palavras)",
-            youtube_id,
-            transcript.source,
-            transcript.word_count,
-        )
+        await save_transcript(session, video, await transcription.transcribe(meta))
 
     if skip_llm:
         return video
+    return await generate(session, video, on_stage=on_stage)
+
+
+async def find_video(session: AsyncSession, youtube_id: str) -> Video | None:
+    video = await _get_video(session, youtube_id)
+    await session.commit()
+    return video
+
+
+async def fetch_video(session: AsyncSession, youtube_id: str) -> tuple[Video, VideoMetadata | None]:
+    """Busca e valida os metadados (passo 1 do fluxo) e grava o `Video`.
+
+    Devolve também os metadados quando o vídeo ainda precisa ser transcrito (eles trazem as
+    legendas); para um vídeo já transcrito devolve `None` no lugar deles.
+    """
+    video = await find_video(session, youtube_id)
+    if video is not None and video.transcript is not None:
+        await _revalidate(session, video)
+        logger.info("vídeo %s já transcrito; reaproveitando", youtube_id)
+        return video, None
+
+    meta = await youtube.fetch_metadata(youtube_id)
+    youtube.validate_metadata(meta)
+    return await _save_metadata(session, video, meta), meta
+
+
+async def save_transcript(
+    session: AsyncSession, video: Video, transcript: transcription.Transcript
+) -> None:
+    video.transcript = transcript.segments
+    video.transcript_source = transcript.source
+    await session.commit()
+    logger.info(
+        "vídeo %s transcrito (%s, %d palavras)",
+        video.youtube_id,
+        transcript.source,
+        transcript.word_count,
+    )
+
+
+async def generate(
+    session: AsyncSession, video: Video, *, on_stage: StageCallback | None = None
+) -> Video:
+    """Gera a receita canônica com o Claude, se ainda não houver uma com o prompt atual.
+
+    Levanta `NotARecipeError`/`NoTranscriptError` quando o vídeo não traz receita.
+    """
+    if video.transcript is None:
+        raise ValueError(f"vídeo {video.youtube_id} ainda não foi transcrito")
 
     has_speech = transcription.is_useful_transcript(video.transcript, video.duration_s)
     if video.generated_recipe is None or video.prompt_version != recipe_llm.PROMPT_VERSION:
@@ -92,7 +124,8 @@ async def process_video(
             raise NoTranscriptError(detail="sem fala útil e descrição curta")
         await _raise_if_llm_gave_up(session, video)
 
-        await stage(ImportStatus.GENERATING)
+        if on_stage is not None:
+            await on_stage(ImportStatus.GENERATING)
         try:
             generation = await recipe_llm.generate_recipe(
                 recipe_llm.VideoContext(
@@ -117,7 +150,7 @@ async def process_video(
         video.prompt_version = generation.prompt_version
         await session.commit()
     else:
-        logger.info("vídeo %s já tem receita (prompt %s)", youtube_id, video.prompt_version)
+        logger.info("vídeo %s já tem receita (prompt %s)", video.youtube_id, video.prompt_version)
 
     if not video.generated_recipe.get("is_recipe"):
         if not has_speech:
@@ -127,7 +160,13 @@ async def process_video(
 
 
 async def _get_video(session: AsyncSession, youtube_id: str) -> Video | None:
-    return await session.scalar(select(Video).where(Video.youtube_id == youtube_id))
+    # populate_existing: com expire_on_commit=False, um Video já carregado na sessão ficaria com
+    # os dados antigos (ex.: a transcrição que o worker do whisper gravou depois).
+    return await session.scalar(
+        select(Video)
+        .where(Video.youtube_id == youtube_id)
+        .execution_options(populate_existing=True)
+    )
 
 
 async def _revalidate(session: AsyncSession, video: Video) -> None:

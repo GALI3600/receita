@@ -19,6 +19,13 @@ docker compose up --build
 - Site: http://localhost:5173
 - API: http://localhost:8000 (docs em http://localhost:8000/docs)
 
+O serviço `migrate` roda `alembic upgrade head` e sai; a API e os workers só sobem depois dele.
+Os imports são processados em segundo plano por dois workers [arq](https://arq-docs.helpmanual.io/):
+
+- `worker`: fila padrão (metadados, legendas, Claude) e varredura de imports parados;
+- `worker-whisper`: só a transcrição com faster-whisper, `WHISPER_MAX_JOBS` por vez (padrão 1). O
+  modelo é carregado quando o worker inicia e fica no volume `hf-cache`.
+
 ## Rodando sem Docker
 
 Suba só o banco e o Redis com `docker compose up db redis`, depois:
@@ -27,12 +34,39 @@ Suba só o banco e o Redis com `docker compose up db redis`, depois:
 # backend
 cd backend
 uv sync
+uv run alembic upgrade head
 uv run uvicorn app.main:app --reload
+uv run arq app.worker.WorkerSettings --custom-log-dict app.worker.LOG_CONFIG          # outro terminal
+uv run arq app.worker.WhisperWorkerSettings --custom-log-dict app.worker.LOG_CONFIG   # outro terminal
 
 # frontend (Node 22+)
 cd frontend
 npm install
 npm run dev
+```
+
+## API
+
+| Método | Rota | |
+|---|---|---|
+| POST | `/imports` `{url}` | Valida o link e enfileira (202). Se a receita já existe (no livro ou de outro usuário), conclui na hora (200) |
+| GET | `/imports/{id}` | `status` (`pending` → `fetching` → `transcribing` → `generating` → `done`/`failed`), `recipe_id`, `error` e `queue_position` |
+| GET | `/recipes?q=&tag=&favorite=&limit=&cursor=` | Livro do usuário, mais recentes primeiro; `q` busca no título, ingredientes e tags, sem diferenciar acentos |
+| GET | `/recipes/{id}` | Receita + vídeo (`youtube_id`, título, canal, thumbnail, duração) |
+| PATCH | `/recipes/{id}` | Edita os campos enviados, `is_favorite`, `user_notes` e `rating` (1–5) |
+| DELETE | `/recipes/{id}` | Remove do livro |
+| POST | `/recipes/{id}/reset` | Volta à receita gerada para o vídeo (mantém favorito, notas e avaliação) |
+
+Erros sempre no formato `{"error": {"code": "...", "message": "..."}}`; erros de validação trazem
+também `details`.
+
+**Usuário (temporário, até a fase 3):** com `ENVIRONMENT=development`, o usuário vem do header
+`X-Dev-User-Id` (um UUID qualquer) e é criado na primeira requisição. Em outro ambiente as rotas
+respondem 401.
+
+```bash
+curl -X POST localhost:8000/imports -H "X-Dev-User-Id: $(uuidgen)" \
+  -H 'Content-Type: application/json' -d '{"url": "https://youtu.be/<id>"}'
 ```
 
 ## Pipeline pela linha de comando
@@ -61,7 +95,8 @@ o pipeline parar de chamar o Claude para ele até `PROMPT_VERSION` mudar.
 ## Checagens
 
 Os testes de banco usam um banco separado (`TEST_DATABASE_URL`, padrão
-`postgresql+asyncpg://receita:receita@localhost:5432/receita_test`):
+`postgresql+asyncpg://receita:receita@localhost:5432/receita_test`) e o db 15 do Redis
+(`TEST_REDIS_URL`, padrão `redis://localhost:6379/15`), esvaziado a cada teste:
 
 ```bash
 docker compose exec db createdb -U receita receita_test   # uma vez

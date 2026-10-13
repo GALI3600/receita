@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import ForeignKey, Index, String, Text
+from sqlalchemy import ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -10,7 +10,15 @@ from app.models.enums import ImportStatus
 
 class Import(UUIDPrimaryKey, Timestamps, Base):
     __tablename__ = "imports"
-    __table_args__ = (Index("ix_imports_user_id_created_at", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_imports_user_id_created_at", "user_id", "created_at"),
+        # Varredura do worker por imports parados (só os que ainda não terminaram).
+        Index(
+            "ix_imports_active_updated_at",
+            "updated_at",
+            postgresql_where=text("status NOT IN ('done', 'failed')"),
+        ),
+    )
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     url: Mapped[str] = mapped_column(Text)
