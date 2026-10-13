@@ -1,4 +1,6 @@
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
+
+import { Alert } from '../components/ui'
 
 import { youtubeThumbnail } from '../lib/format'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
@@ -89,8 +91,19 @@ function ExampleRecipe() {
 
 export function LandingPage() {
   useDocumentTitle(null)
+  const location = useLocation()
+  const accountDeleted =
+    (location.state as { accountDeleted?: boolean } | null)?.accountDeleted === true
   return (
     <div className="overflow-x-clip">
+      {accountDeleted && (
+        <div className="mx-auto max-w-6xl px-4 pt-6">
+          <Alert tone="success" title="Sua conta foi excluída">
+            Apagamos seu livro, suas notas e o histórico de importações. Obrigado por ter cozinhado
+            com a gente.
+          </Alert>
+        </div>
+      )}
       <section className="mx-auto grid max-w-6xl items-center gap-12 px-4 py-10 sm:py-16 lg:grid-cols-2">
         <div>
           <p className="eyebrow">Seu livro de receitas</p>

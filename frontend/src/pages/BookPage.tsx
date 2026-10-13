@@ -11,18 +11,129 @@ import { useDebouncedValue } from '../lib/useDebouncedValue'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useCurrentUser } from '../session/context'
 
+const TAGS_COLLAPSED = 10
+
+/** Tags do livro como fichas clicáveis (uma por vez, como o filtro da API). */
+function TagFilter({
+  tags,
+  selected,
+  onSelect,
+}: {
+  tags: string[]
+  selected: string
+  onSelect: (tag: string | null) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const labelId = useId()
+  const listId = useId()
+  // A tag escolhida aparece sempre, mesmo com a lista recolhida.
+  const visible = expanded
+    ? tags
+    : tags.filter((tag, index) => index < TAGS_COLLAPSED || tag === selected)
+  const hidden = tags.length - visible.length
+  const chip = (active: boolean) =>
+    `tag-chip tag-chip-action ${
+      active
+        ? 'border-terracotta bg-terracotta text-on-accent hover:bg-terracotta-dark'
+        : 'bg-card hover:border-terracotta/60 hover:text-terracotta'
+    }`
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-labelledby={labelId}>
+      <span id={labelId} className="mr-1 text-sm font-semibold">
+        Tags
+      </span>
+      <ul id={listId} className="contents">
+        <li>
+          <button
+            type="button"
+            className={chip(!selected)}
+            aria-pressed={!selected}
+            onClick={() => onSelect(null)}
+          >
+            Todas
+          </button>
+        </li>
+        {visible.map((tag) => (
+          <li key={tag}>
+            <button
+              type="button"
+              className={chip(tag === selected)}
+              aria-pressed={tag === selected}
+              onClick={() => onSelect(tag === selected ? null : tag)}
+            >
+              #{tag}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {(hidden > 0 || expanded) && tags.length > TAGS_COLLAPSED && (
+        <button
+          type="button"
+          className="link inline-flex min-h-11 items-center text-sm"
+          aria-expanded={expanded}
+          aria-controls={listId}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? 'Mostrar menos' : `Mais ${hidden} ${hidden === 1 ? 'tag' : 'tags'}`}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function OpenBookArt() {
+  return (
+    <svg viewBox="0 0 160 96" className="mx-auto h-24 w-40 text-terracotta" aria-hidden="true">
+      <path
+        d="M80 20c-18-10-40-12-64-6v70c24-6 46-4 64 6 18-10 40-12 64-6V14c-24-6-46-4-64 6z"
+        fill="var(--color-card)"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinejoin="round"
+      />
+      <path d="M80 20v70" stroke="currentColor" strokeWidth="2.5" />
+      <g stroke="var(--color-line)" strokeWidth="2.5" strokeLinecap="round">
+        <path d="M30 34h36M30 44h30M30 54h34M30 64h24" />
+        <path d="M94 34h36M94 44h22" />
+      </g>
+      <path
+        d="M104 58c4-8 18-8 22 0M100 60h30l-3 10h-24z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.5"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+const EMPTY_STEPS = [
+  'Copie o link de um vídeo de receita no YouTube.',
+  'Cole em “Nova receita” e espere a gente escrever.',
+  'Cozinhe com a receita e o vídeo lado a lado.',
+]
+
 function EmptyBook() {
   return (
-    <div className="page-sheet mx-auto max-w-xl px-6 py-12 text-center">
-      <p className="ornament font-serif text-2xl" aria-hidden="true">
-        ❦
-      </p>
-      <h2 className="mt-4 text-2xl font-semibold">Seu livro ainda está em branco</h2>
+    <div className="page-sheet mx-auto max-w-xl px-6 py-10 text-center sm:px-10">
+      <OpenBookArt />
+      <h2 className="mt-4 text-2xl font-semibold sm:text-3xl">Seu livro ainda está em branco</h2>
       <p className="mt-2 text-ink-soft">
-        Cole o link de um vídeo de receita do YouTube e a gente escreve a receita para você, com
-        ingredientes, passo a passo e o vídeo junto.
+        Que tal começar pela receita que você sempre quis aprender? A gente transforma o vídeo em
+        ingredientes e passo a passo, com o vídeo junto.
       </p>
-      <Link to="/nova" className="btn-primary mt-6">
+      <ol className="mx-auto mt-6 max-w-sm space-y-2 text-left">
+        {EMPTY_STEPS.map((step, index) => (
+          <li key={step} className="flex items-baseline gap-3">
+            <span className="font-serif text-xl font-semibold text-terracotta" aria-hidden="true">
+              {index + 1}
+            </span>
+            <span>{step}</span>
+          </li>
+        ))}
+      </ol>
+      <Link to="/nova" className="btn-primary mt-8">
         Importar minha primeira receita
       </Link>
     </div>
@@ -33,7 +144,6 @@ export function BookPage() {
   useDocumentTitle('Meu livro')
   const user = useCurrentUser()
   const searchId = useId()
-  const tagId = useId()
   const location = useLocation()
   const deletedTitle = (location.state as { deleted?: string } | null)?.deleted
   const [params, setParams] = useSearchParams()
@@ -124,52 +234,44 @@ export function BookPage() {
 
       <div
         role="search"
-        className="mt-6 flex flex-col gap-3 rounded-lg border border-line bg-card/70 p-3 sm:flex-row sm:items-end"
+        aria-label="Filtrar receitas"
+        className="mt-6 rounded-lg border border-line bg-card/70 p-3 sm:p-4"
       >
-        <div className="flex-1">
-          <label htmlFor={searchId} className="mb-1 block text-sm font-semibold">
-            Buscar
-          </label>
-          <input
-            id={searchId}
-            type="search"
-            className="field-input"
-            placeholder="Título, ingrediente ou tag"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </div>
-        <div className="sm:w-48">
-          <label htmlFor={tagId} className="mb-1 block text-sm font-semibold">
-            Tag
-          </label>
-          <select
-            id={tagId}
-            className="field-input"
-            value={tag}
-            onChange={(e) => updateParam('tag', e.target.value || null)}
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+          <div className="flex-1">
+            <label htmlFor={searchId} className="mb-1 block text-sm font-semibold">
+              Buscar
+            </label>
+            <input
+              id={searchId}
+              type="search"
+              className="field-input"
+              placeholder="Título, ingrediente ou tag"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          <button
+            type="button"
+            aria-pressed={favorite}
+            onClick={() => updateParam('favoritas', favorite ? null : '1')}
+            className={`btn min-h-11 rounded-lg border px-4 ${
+              favorite
+                ? 'border-terracotta bg-terracotta-tint text-terracotta-dark'
+                : 'border-ink/55 bg-card text-ink hover:bg-paper-deep'
+            }`}
           >
-            <option value="">Todas</option>
-            {tagOptions.map((option) => (
-              <option key={option} value={option}>
-                #{option}
-              </option>
-            ))}
-          </select>
+            <HeartIcon filled={favorite} className="size-5 text-terracotta" />
+            Favoritas
+          </button>
         </div>
-        <button
-          type="button"
-          aria-pressed={favorite}
-          onClick={() => updateParam('favoritas', favorite ? null : '1')}
-          className={`btn min-h-11 rounded-lg border px-4 ${
-            favorite
-              ? 'border-terracotta bg-terracotta-tint text-terracotta-dark'
-              : 'border-ink/55 bg-card text-ink hover:bg-paper-deep'
-          }`}
-        >
-          <HeartIcon filled={favorite} className="size-5 text-terracotta" />
-          Favoritas
-        </button>
+        {tagOptions.length > 0 && (
+          <TagFilter
+            tags={tagOptions}
+            selected={tag}
+            onSelect={(value) => updateParam('tag', value)}
+          />
+        )}
       </div>
 
       <p className="sr-only" aria-live="polite">

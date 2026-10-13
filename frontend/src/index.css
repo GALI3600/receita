@@ -1,7 +1,8 @@
 @import 'tailwindcss';
 
 /* Livro de receitas: papel creme, tinta marrom, acento terracota. Contraste AA conferido
-   (texto principal 12,7:1; secundário 6,5:1; terracota 5,4:1 no papel e 5,8:1 com texto branco). */
+   (texto principal 12,7:1; secundário 6,5:1; terracota 5,4:1 no papel e 5,8:1 com texto branco).
+   O modo noturno ("livro à noite", mais abaixo) troca só estas variáveis. */
 @theme {
   --font-serif: 'Fraunces Variable', 'Iowan Old Style', Georgia, serif;
   --font-sans: 'Source Sans 3 Variable', 'Segoe UI', system-ui, sans-serif;
@@ -20,6 +21,12 @@
   --color-danger: #9b2c2c;
   --color-danger-tint: #f8e1de;
   --color-mustard-tint: #f7ecc9;
+  --color-mustard-line: #c9a227;
+  --color-danger-dark: #7f2222;
+  /* Texto sobre os botões cheios (terracota, perigo). */
+  --color-on-accent: #ffffff;
+  /* Área do vídeo: sempre escura, também no modo noturno. */
+  --color-screen: #2b1f18;
 
   --shadow-page: 0 1px 0 rgb(59 42 32 / 0.04), 0 12px 32px -18px rgb(59 42 32 / 0.35);
   --shadow-cover: 0 1px 2px rgb(59 42 32 / 0.08), 0 10px 22px -14px rgb(59 42 32 / 0.45);
@@ -37,8 +44,8 @@
     line-height: 1.6;
     /* Textura discreta de papel. */
     background-image:
-      radial-gradient(circle at 20% 10%, rgb(255 255 255 / 0.6), transparent 40%),
-      radial-gradient(circle at 80% 90%, rgb(241 232 216 / 0.7), transparent 45%);
+      radial-gradient(circle at 20% 10%, var(--paper-glow), transparent 40%),
+      radial-gradient(circle at 80% 90%, var(--paper-shade), transparent 45%);
   }
 
   h1,
@@ -69,7 +76,7 @@
     @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-full px-5 py-2 text-base font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
   }
   .btn-primary {
-    @apply bg-terracotta text-white hover:bg-terracotta-dark;
+    @apply bg-terracotta text-on-accent hover:bg-terracotta-dark;
   }
   .btn-secondary {
     @apply border border-ink/25 bg-card text-ink hover:border-ink/50 hover:bg-paper-deep;
@@ -78,7 +85,7 @@
     @apply px-3 text-ink-soft hover:bg-paper-deep hover:text-ink;
   }
   .btn-danger {
-    @apply bg-danger text-white hover:bg-[#7f2222];
+    @apply bg-danger text-on-accent hover:bg-danger-dark;
   }
 
   /* Foco: o anel terracota de :focus-visible (como nos botões) além da borda colorida. */
@@ -112,6 +119,45 @@
     inset: -4px 0;
   }
 
+  /* Diálogo de confirmação: uma folha sobre a página escurecida. */
+  .dialog-sheet {
+    @apply m-auto w-[min(32rem,calc(100vw-2rem))] rounded-lg border border-line bg-card px-6 py-6 text-ink shadow-page;
+    animation: dialog-in 180ms ease-out;
+  }
+  .dialog-sheet::backdrop {
+    background: var(--backdrop);
+  }
+
+  /* Coluna da direita da receita: a dobra entre as duas páginas do livro aberto. */
+  @media (min-width: 1024px) {
+    .book-gutter {
+      border-left: 1px solid var(--color-line);
+      box-shadow: inset 16px 0 18px -18px var(--gutter-shadow);
+    }
+  }
+
+  /* Bloco de notas pautado. */
+  .notes-paper {
+    background-image: repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent calc(2rem - 1px),
+      var(--color-line) calc(2rem - 1px),
+      var(--color-line) 2rem
+    );
+    background-attachment: local;
+    background-position: 0 0.5rem;
+    line-height: 2rem;
+  }
+
+  .menu-panel:not([hidden]) {
+    animation: fade-up 160ms ease-out;
+  }
+
+  .heart-pop {
+    animation: heart-pop 320ms ease-out;
+  }
+
   .ornament {
     @apply flex items-center gap-3 text-terracotta;
   }
@@ -119,6 +165,71 @@
   .ornament::after {
     content: '';
     @apply h-px flex-1 bg-line;
+  }
+}
+
+:root {
+  --paper-glow: rgb(255 255 255 / 0.6);
+  --paper-shade: rgb(241 232 216 / 0.7);
+  --backdrop: rgb(59 42 32 / 0.5);
+  --gutter-shadow: rgb(59 42 32 / 0.35);
+}
+
+/* Livro à noite: segue o modo escuro do sistema (só na tela; impresso é sempre papel claro).
+   Contraste AA conferido: texto 13,9:1 no cartão, secundário 8,5:1, terracota 7,2:1, texto
+   escuro sobre os botões terracota 7,7:1. */
+@media screen and (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: #1c1612;
+    --color-paper-deep: #2a211b;
+    --color-card: #241c17;
+    --color-line: #46382d;
+    --color-ink: #f3e9da;
+    --color-ink-soft: #c8b6a2;
+    --color-terracotta: #ec9472;
+    --color-terracotta-dark: #f4ad8f;
+    --color-terracotta-tint: #3e261c;
+    --color-sage: #8fcfa9;
+    --color-sage-tint: #1f3328;
+    --color-danger: #f19a8f;
+    --color-danger-dark: #f5b3aa;
+    --color-danger-tint: #3d1f1c;
+    --color-mustard-tint: #3a3118;
+    --color-mustard-line: #a8862a;
+    --color-on-accent: #1c1612;
+    --shadow-page: 0 1px 0 rgb(0 0 0 / 0.3), 0 14px 34px -18px rgb(0 0 0 / 0.8);
+    --shadow-cover: 0 1px 2px rgb(0 0 0 / 0.35), 0 10px 22px -14px rgb(0 0 0 / 0.85);
+    --paper-glow: rgb(255 240 220 / 0.035);
+    --paper-shade: rgb(0 0 0 / 0.25);
+    --backdrop: rgb(0 0 0 / 0.6);
+    --gutter-shadow: rgb(0 0 0 / 0.6);
+  }
+  html {
+    color-scheme: dark;
+  }
+  /* As fotos dos vídeos um pouco mais suaves no escuro. */
+  img {
+    filter: brightness(0.92);
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes heart-pop {
+  50% {
+    transform: scale(1.3);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
   }
 }
 
@@ -141,8 +252,23 @@
 }
 
 @media print {
+  @page {
+    margin: 14mm 14mm 16mm;
+  }
+  html {
+    font-size: 11pt;
+  }
   body {
     background: white;
+    color: #000;
+  }
+  main {
+    display: block;
+  }
+  h1,
+  h2,
+  h3 {
+    break-after: avoid;
   }
   .recipe-aside,
   .recipe-ingredients {
@@ -153,5 +279,21 @@
   .page-sheet {
     box-shadow: none;
     border: none;
+    padding: 0 !important;
+  }
+  .book-gutter {
+    border: none;
+    box-shadow: none;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  label:hover {
+    background: transparent !important;
+  }
+  /* Caixas vazias para ir marcando no papel. */
+  .ingredient-check {
+    accent-color: #000;
   }
 }

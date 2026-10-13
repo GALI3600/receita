@@ -23,14 +23,16 @@ function SessionError() {
  * apresentação, logo depois de a pessoa sair da conta).
  */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { status, signedOut } = useSession()
+  const { status, signedOut, accountDeleted } = useSession()
   const location = useLocation()
   if (status === 'loading') return <LoadingPage />
   if (status === 'error') return <SessionError />
   if (status === 'anonymous') {
     // Quem acabou de sair vai para a apresentação; sessão expirada, para o login (com volta).
     const target = signedOut ? '/' : loginPath(location.pathname + location.search)
-    return <Navigate to={target} replace />
+    return (
+      <Navigate to={target} replace state={accountDeleted ? { accountDeleted: true } : undefined} />
+    )
   }
   return children
 }

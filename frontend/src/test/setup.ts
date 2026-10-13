@@ -5,6 +5,12 @@ import { afterEach, vi } from 'vitest'
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  // Marcações de ingredientes guardadas por um teste não vazam para o próximo.
+  try {
+    window.localStorage.clear()
+  } catch {
+    // sem armazenamento
+  }
 })
 
 // jsdom não implementa matchMedia nem scrollIntoView.

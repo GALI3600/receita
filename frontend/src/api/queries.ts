@@ -9,7 +9,7 @@ import {
 } from '@tanstack/react-query'
 import { pollInterval } from '../lib/importStatus'
 import { ApiError } from './client'
-import { authApi, importsApi, recipesApi } from './endpoints'
+import { accountApi, authApi, importsApi, recipesApi } from './endpoints'
 import type { ImportOut, Me, Recipe, RecipeFilters, RecipePage, RecipeUpdate } from './types'
 
 export const queryKeys = {
@@ -214,31 +214,68 @@ export function useRecipe(id: string) {
   })
 }
 
+// Campos do usuário (não da receita): mudam na hora na tela, antes de a API responder.
+const OPTIMISTIC_FIELDS = ['is_favorite', 'rating', 'user_notes'] as const
+
+function pick<T extends object>(source: T, keys: string[]): Partial<T> {
+  const result: Partial<T> = {}
+  for (const key of keys) {
+    if (key in source) result[key as keyof T] = source[key as keyof T]
+  }
+  return result
+}
+
+/**
+ * PATCH /recipes/{id}. Favorito, avaliação e notas são otimistas (desfeitos se a API recusar);
+ * as edições da receita só aparecem com a resposta. Cada pedido só mexe no cache nos campos que
+ * enviou: favoritar enquanto a nota ainda está sendo salva não desfaz a nota.
+ */
 export function useUpdateRecipe(id: string) {
   const client = useQueryClient()
   return useMutation({
+    mutationKey: ['updateRecipe', id],
     mutationFn: (changes: RecipeUpdate) => recipesApi.update(id, changes),
     onMutate: async (changes) => {
-      // Atualização otimista (ex.: favoritar responde na hora); desfeita se a API recusar.
+      const optimistic = pick(changes, [...OPTIMISTIC_FIELDS]) as Partial<Recipe>
+      const keys = Object.keys(optimistic)
+      if (keys.length === 0) return { previous: {} as Partial<Recipe> }
       await client.cancelQueries({ queryKey: queryKeys.recipe(id) })
-      const previous = client.getQueryData<Recipe>(queryKeys.recipe(id))
-      if (previous) {
-        client.setQueryData<Recipe>(queryKeys.recipe(id), {
-          ...previous,
-          ...(changes as Partial<Recipe>),
-        })
-      }
-      return { previous }
+      const current = client.getQueryData<Recipe>(queryKeys.recipe(id))
+      if (!current) return { previous: {} as Partial<Recipe> }
+      client.setQueryData<Recipe>(queryKeys.recipe(id), { ...current, ...optimistic })
+      return { previous: pick(current, keys) }
     },
     onError: (_error, _changes, context) => {
-      if (context?.previous) client.setQueryData(queryKeys.recipe(id), context.previous)
+      if (!context || Object.keys(context.previous).length === 0) return
+      client.setQueryData<Recipe>(queryKeys.recipe(id), (current) =>
+        current ? { ...current, ...context.previous } : current,
+      )
     },
-    onSuccess: (recipe) => client.setQueryData(queryKeys.recipe(id), recipe),
+    onSuccess: (recipe, changes) => {
+      client.setQueryData<Recipe>(queryKeys.recipe(id), (current) =>
+        current
+          ? { ...current, ...pick(recipe, Object.keys(changes)), updated_at: recipe.updated_at }
+          : recipe,
+      )
+    },
     onSettled: () =>
       Promise.all([
         client.invalidateQueries({ queryKey: ['recipes', 'list'] }),
         client.invalidateQueries({ queryKey: queryKeys.recipeTags }),
       ]),
+  })
+}
+
+/** POST /recipes/{id}/reset: volta à receita gerada para o vídeo. */
+export function useResetRecipe(id: string) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: () => recipesApi.reset(id),
+    onSuccess: (recipe) => {
+      client.setQueryData(queryKeys.recipe(id), recipe)
+      void client.invalidateQueries({ queryKey: ['recipes', 'list'] })
+      void client.invalidateQueries({ queryKey: queryKeys.recipeTags })
+    },
   })
 }
 
@@ -252,4 +289,16 @@ export function useDeleteRecipe(id: string) {
       void client.invalidateQueries({ queryKey: queryKeys.recipeTags })
     },
   })
+}
+
+// --- Conta ---------------------------------------------------------------------------------
+
+/** GET /account/export: os dados chegam como JSON e viram um arquivo para baixar. */
+export function useExportAccount() {
+  return useMutation({ mutationFn: accountApi.export })
+}
+
+/** DELETE /account (com a senha). Quem chama encerra a sessão na interface depois do sucesso. */
+export function useDeleteAccount() {
+  return useMutation({ mutationFn: accountApi.remove })
 }

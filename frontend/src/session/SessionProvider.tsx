@@ -15,7 +15,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const { mutateAsync, isPending } = logoutMutation
   // A pessoa clicou em "Sair": as rotas protegidas mandam para a apresentação, não para o login.
   // Vale só até chegar lá: depois, abrir uma rota protegida volta a levar ao login.
-  const [signedOut, setSignedOut] = useState(false)
+  const [signedOut, setSignedOut] = useState<false | 'logout' | 'deleted'>(false)
   const [previousData, setPreviousData] = useState(data)
   const { pathname } = useLocation()
   if (data !== previousData) {
@@ -33,13 +33,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return {
       status,
       user: data ?? null,
-      signedOut: status === 'anonymous' && signedOut,
+      signedOut: status === 'anonymous' && Boolean(signedOut),
+      accountDeleted: status === 'anonymous' && signedOut === 'deleted',
       logout: async () => {
         // Falhou (rede, 5xx): o erro sobe para a tela e a sessão continua como está.
         await mutateAsync()
         // Primeiro marca a saída, depois limpa a sessão: quando as rotas virem o usuário
         // anônimo, já sabem que foi um logout.
-        flushSync(() => setSignedOut(true))
+        flushSync(() => setSignedOut('logout'))
+        clearSession(client)
+      },
+      endAfterAccountDeleted: () => {
+        flushSync(() => setSignedOut('deleted'))
         clearSession(client)
       },
       isLoggingOut: isPending,

@@ -135,6 +135,25 @@ React + TypeScript + Vite, Tailwind, React Router e TanStack Query. Rotas: `/` (
   topo enquanto se lê a receita, como pede o plano; no desktop, player e ingredientes ficam fixos
   à esquerda e, se não couberem na altura da tela, só a lista de ingredientes rola. Se o vídeo
   estiver indisponível, os tempos dos passos viram texto.
+- Na página da receita: **editar** tudo (título, resumo, rendimento, tempos, dificuldade,
+  ingredientes e passos com reordenação, tempo do passo em `mm:ss`, dicas e tags), com validação
+  pelos mesmos limites do backend, erros por campo (inclusive os `details` do 422) e aviso ao sair
+  com alterações não salvas; **restaurar a receita original** (com confirmação); **notas**
+  salvas sozinhas (1 s depois de parar de digitar, ou ao sair do campo); **avaliação** de 1 a 5
+  estrelas (grupo de rádios, funciona pelo teclado); **favorito** otimista; **porções** com − e +
+  quando o rendimento tem número ("6 unidades"), escalando inteiros, decimais com vírgula,
+  frações ("1/2", "1 e 1/2", "½") e faixas ("2-3", "2 a 3"), com frações de cozinha no
+  resultado e "a gosto" intacto (`src/lib/quantity.ts`); ingredientes marcados guardados no
+  navegador por receita (`localStorage`, com "Limpar marcações"); e **impressão** em layout de
+  livro (sem player, navegação nem tempos, ingredientes em duas colunas, notas e o link do vídeo
+  no rodapé).
+- No livro, busca, tag (fichas clicáveis) e favoritas se combinam e ficam na query string
+  (`/livro?tag=chocolate&favoritas=1&q=leite`): dá para compartilhar, voltar e recarregar. A API
+  ainda não tem ordenação, então a lista é sempre das mais recentes para as mais antigas.
+- Em `/conta`: perfil, cota do dia com barra, exportar os dados (baixa
+  `receita-meus-dados.json`), excluir a conta (senha + confirmação) e sair.
+- "Livro à noite": com o sistema em modo escuro, a interface troca as cores (só na tela; a
+  impressão continua clara). As animações respeitam `prefers-reduced-motion`.
 - Os links de confirmação e de redefinição de senha têm o token tirado da barra de endereço assim
   que a página abre, e o `index.html` define `Referrer-Policy: strict-origin-when-cross-origin`
   (o proxy de produção deve mandar o mesmo header).

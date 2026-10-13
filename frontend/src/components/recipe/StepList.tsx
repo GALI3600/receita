@@ -22,7 +22,7 @@ export function StepList({ steps, activeOrder, onSeek }: StepListProps) {
           <li
             key={step.order}
             aria-current={active ? 'step' : undefined}
-            className={`flex gap-3 rounded-lg border px-2 py-3 transition-colors sm:gap-4 sm:px-4 ${
+            className={`flex gap-3 rounded-lg border px-2 py-3 transition-colors sm:gap-4 sm:px-4 print:break-inside-avoid print:border-0 print:bg-transparent print:px-0 print:py-1.5 ${
               active ? 'border-terracotta/50 bg-terracotta-tint' : 'border-transparent'
             }`}
           >
@@ -49,7 +49,9 @@ export function StepList({ steps, activeOrder, onSeek }: StepListProps) {
                     {formatTimestamp(time)}
                   </button>
                 ) : (
-                  <p className="mt-1 text-sm text-ink-soft">No vídeo em {formatTimestamp(time)}</p>
+                  <p className="mt-1 text-sm text-ink-soft print:hidden">
+                    No vídeo em {formatTimestamp(time)}
+                  </p>
                 ))}
             </div>
           </li>

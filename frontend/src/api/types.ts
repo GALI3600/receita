@@ -137,6 +137,21 @@ export interface RecipeFilters {
   favorite?: boolean
 }
 
+export interface IngredientIn {
+  name: string
+  quantity?: string | null
+  unit?: string | null
+  note?: string | null
+  group?: string | null
+}
+
+/** Passo enviado no PATCH: a ordem é a da lista. */
+export interface StepIn {
+  text: string
+  video_timestamp_s?: number | null
+}
+
+/** PATCH /recipes/{id}: só os campos enviados mudam; `null` limpa os opcionais. */
 export interface RecipeUpdate {
   title?: string
   summary?: string
@@ -144,6 +159,8 @@ export interface RecipeUpdate {
   prep_time_min?: number | null
   cook_time_min?: number | null
   difficulty?: Difficulty | null
+  ingredients?: IngredientIn[]
+  steps?: StepIn[]
   tips?: string[]
   tags?: string[]
   is_favorite?: boolean

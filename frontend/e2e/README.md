@@ -17,4 +17,12 @@ docker run --rm --network host --ipc=host \
   npx playwright test
 ```
 
-As capturas de tela (360px e 1280px) ficam em `e2e/screenshots/`.
+- `journey.spec.ts` e `review.spec.ts`: jornada principal e regressões da fase 4;
+- `phase5.spec.ts`: edição e restauração, notas, avaliação, porções, marcações, filtros na URL,
+  impressão, exportar e excluir a conta;
+- `a11y.spec.ts`: axe-core (WCAG 2.1 A/AA) nas páginas principais, tema claro e escuro, 360px e
+  1280px;
+- `screenshots.spec.ts`: capturas de tela (360px e 1280px, inclusive impressão em PNG/PDF A4 e
+  modo escuro) em `e2e/screenshots/`.
+
+Para rodar um arquivo só, passe o caminho no fim: `npx playwright test e2e/a11y.spec.ts`.

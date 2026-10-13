@@ -12,7 +12,7 @@ interface RecipeCardProps {
 /** Card no estilo capa de livro: foto do vídeo, lombada terracota e título em serifa. */
 export function RecipeCard({ recipe, onTagClick }: RecipeCardProps) {
   return (
-    <article className="group relative flex h-full flex-col overflow-hidden rounded-r-md rounded-l-sm border border-line bg-card shadow-cover transition-shadow focus-within:shadow-page hover:shadow-page">
+    <article className="group relative flex h-full flex-col overflow-hidden rounded-r-md rounded-l-sm border border-line bg-card shadow-cover transition-[box-shadow,translate] duration-200 focus-within:shadow-page hover:-translate-y-0.5 hover:shadow-page motion-reduce:hover:translate-y-0">
       <span
         aria-hidden="true"
         className="absolute inset-y-0 left-0 z-10 w-2 bg-gradient-to-r from-terracotta-dark to-terracotta"
@@ -42,6 +42,22 @@ export function RecipeCard({ recipe, onTagClick }: RecipeCardProps) {
           </Link>
         </h2>
         <RecipeMeta recipe={recipe} />
+        {recipe.rating !== null && (
+          <p className="flex items-center gap-0.5 text-terracotta">
+            {[1, 2, 3, 4, 5].map((n) => (
+              <svg key={n} viewBox="0 0 24 24" className="size-4" aria-hidden="true">
+                <path
+                  d="m12 3.6 2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"
+                  fill={n <= (recipe.rating ?? 0) ? 'currentColor' : 'none'}
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            ))}
+            <span className="sr-only">Avaliação: {recipe.rating} de 5</span>
+          </p>
+        )}
         {recipe.tags.length > 0 && (
           <ul className="relative z-10 mt-auto flex flex-wrap gap-2 pt-1" aria-label="Tags">
             {recipe.tags.slice(0, 4).map((tag) => (
@@ -69,11 +85,19 @@ export function RecipeCard({ recipe, onTagClick }: RecipeCardProps) {
 
 export function RecipeCardSkeleton() {
   return (
-    <div className="overflow-hidden rounded-md border border-line bg-card" aria-hidden="true">
-      <div className="aspect-video animate-pulse bg-paper-deep" />
-      <div className="space-y-2 p-4">
+    <div
+      className="relative overflow-hidden rounded-r-md rounded-l-sm border border-line bg-card shadow-cover"
+      aria-hidden="true"
+    >
+      <span className="absolute inset-y-0 left-0 w-2 bg-line" />
+      <div className="ml-2 aspect-video animate-pulse bg-paper-deep" />
+      <div className="ml-2 space-y-3 px-4 pt-4 pb-5">
         <div className="h-5 w-3/4 animate-pulse rounded bg-paper-deep" />
         <div className="h-4 w-1/3 animate-pulse rounded bg-paper-deep" />
+        <div className="flex gap-2 pt-2">
+          <div className="h-7 w-16 animate-pulse rounded-full bg-paper-deep" />
+          <div className="h-7 w-20 animate-pulse rounded-full bg-paper-deep" />
+        </div>
       </div>
     </div>
   )

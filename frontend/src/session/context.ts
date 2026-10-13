@@ -9,8 +9,12 @@ export interface SessionValue {
   user: Me | null
   /** Anônimo porque a pessoa saiu da conta agora (e não porque a sessão expirou). */
   signedOut: boolean
+  /** Saiu porque acabou de excluir a conta (a apresentação mostra o aviso). */
+  accountDeleted: boolean
   /** Encerra a sessão; rejeita (e mantém a sessão) se o servidor não confirmar. */
   logout: () => Promise<void>
+  /** Esquece a sessão só na interface, depois de o servidor já tê-la encerrado (conta excluída). */
+  endAfterAccountDeleted: () => void
   isLoggingOut: boolean
   retry: () => void
 }

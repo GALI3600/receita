@@ -31,7 +31,7 @@ type AlertTone = 'info' | 'success' | 'warning' | 'error'
 const ALERT_STYLES: Record<AlertTone, string> = {
   info: 'border-line bg-paper-deep',
   success: 'border-sage/40 bg-sage-tint',
-  warning: 'border-[#c9a227]/60 bg-mustard-tint',
+  warning: 'border-mustard-line/60 bg-mustard-tint',
   error: 'border-danger/40 bg-danger-tint',
 }
 

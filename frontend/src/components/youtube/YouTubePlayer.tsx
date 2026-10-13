@@ -124,7 +124,7 @@ export function YouTubePlayer({
 
   return (
     <div
-      className="relative aspect-video w-full overflow-hidden rounded-md bg-ink shadow-cover"
+      className="relative aspect-video w-full overflow-hidden rounded-md bg-screen shadow-cover"
       data-player-status={status}
       data-last-seek={lastSeek ?? undefined}
     >
@@ -142,7 +142,7 @@ export function YouTubePlayer({
       {unavailable && (
         <div className="absolute inset-0">
           <img src={thumbnail} alt={`Capa do vídeo ${title}`} className="size-full object-cover" />
-          <div className="absolute inset-0 flex items-end bg-gradient-to-t from-ink/90 via-ink/50 to-transparent p-4">
+          <div className="absolute inset-0 flex items-end bg-gradient-to-t from-screen/95 via-screen/60 to-transparent p-4">
             <div className="text-white" role="status">
               <p className="font-serif text-xl font-semibold">Vídeo indisponível</p>
               <p className="text-sm text-white/90">

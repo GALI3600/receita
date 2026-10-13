@@ -52,7 +52,16 @@ export const recipesApi = {
     apiFetch<Recipe>(`/recipes/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
   remove: (id: string) =>
     apiFetch<void>(`/recipes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  reset: (id: string) =>
+    apiFetch<Recipe>(`/recipes/${encodeURIComponent(id)}/reset`, { method: 'POST' }),
 }
 
-/** Link de download dos dados da conta (GET simples, o cookie vai junto). */
-export const ACCOUNT_EXPORT_URL = '/api/account/export'
+export const accountApi = {
+  /** Todos os dados da conta (LGPD), para baixar como arquivo JSON. */
+  export: () => apiFetch<unknown>('/account/export'),
+  remove: (password: string) =>
+    apiFetch<void>('/account', { method: 'DELETE', body: { password } }),
+}
+
+/** Nome do arquivo baixado (o mesmo do Content-Disposition do backend). */
+export const ACCOUNT_EXPORT_FILENAME = 'receita-meus-dados.json'
