@@ -1,18 +1,15 @@
 import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'react'
 
-import { youtubeThumbnail, youtubeWatchUrl } from '../../lib/format'
+import { safeThumbnail, youtubeWatchUrl } from '../../lib/format'
 import { Spinner } from '../ui'
 import { loadYouTubeApi } from './loadYouTubeApi'
+import { isPlayerUnavailable, type PlayerStatus } from './playerStatus'
 
 /** O que a página da receita pode fazer com o player (via ref). */
 export interface YouTubePlayerHandle {
   /** Pula para `seconds` e dá play; antes de o player ficar pronto, guarda o pedido. */
   seekTo: (seconds: number) => void
-  /** Rola a página até o player (usado no celular, onde ele não fica fixo na tela). */
-  scrollIntoView: () => void
 }
-
-type PlayerStatus = 'loading' | 'ready' | 'unavailable' | 'error'
 
 // 100: removido/privado; 101 e 150: o dono não permite incorporar; 153: embed sem referer.
 const UNAVAILABLE_ERRORS = new Set([100, 101, 150, 153])
@@ -21,16 +18,32 @@ interface YouTubePlayerProps {
   videoId: string
   title: string
   thumbnailUrl?: string | null
+  /** Avisado a cada mudança de estado (a página tira os botões de tempo se o vídeo sumir). */
+  onStatusChange?: (status: PlayerStatus) => void
   ref?: Ref<YouTubePlayerHandle>
 }
 
-export function YouTubePlayer({ videoId, title, thumbnailUrl, ref }: YouTubePlayerProps) {
-  const wrapperRef = useRef<HTMLDivElement>(null)
+export function YouTubePlayer({
+  videoId,
+  title,
+  thumbnailUrl,
+  onStatusChange,
+  ref,
+}: YouTubePlayerProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const playerRef = useRef<YT.Player | null>(null)
   const pendingSeek = useRef<number | null>(null)
   const [status, setStatus] = useState<PlayerStatus>('loading')
   const [lastSeek, setLastSeek] = useState<number | null>(null)
+  const onStatusChangeRef = useRef(onStatusChange)
+
+  useEffect(() => {
+    onStatusChangeRef.current = onStatusChange
+  })
+
+  useEffect(() => {
+    onStatusChangeRef.current?.(status)
+  }, [status])
 
   useEffect(() => {
     const host = hostRef.current
@@ -102,20 +115,16 @@ export function YouTubePlayer({ videoId, title, thumbnailUrl, ref }: YouTubePlay
           pendingSeek.current = seconds
         }
       },
-      scrollIntoView() {
-        wrapperRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      },
     }),
     [],
   )
 
-  const unavailable = status === 'unavailable' || status === 'error'
-  const thumbnail = thumbnailUrl || youtubeThumbnail(videoId)
+  const unavailable = isPlayerUnavailable(status)
+  const thumbnail = safeThumbnail(thumbnailUrl, videoId)
 
   return (
     <div
-      ref={wrapperRef}
-      className="relative aspect-video w-full scroll-mt-4 overflow-hidden rounded-md bg-ink shadow-cover"
+      className="relative aspect-video w-full overflow-hidden rounded-md bg-ink shadow-cover"
       data-player-status={status}
       data-last-seek={lastSeek ?? undefined}
     >
@@ -143,7 +152,7 @@ export function YouTubePlayer({ videoId, title, thumbnailUrl, ref }: YouTubePlay
                 A receita continua no seu livro.
               </p>
               <a
-                className="mt-1 inline-block text-sm font-semibold text-white underline underline-offset-4"
+                className="relative mt-1 inline-block text-sm font-semibold text-white underline underline-offset-4 after:absolute after:-inset-x-2 after:-inset-y-3 after:content-['']"
                 href={youtubeWatchUrl(videoId)}
                 target="_blank"
                 rel="noreferrer"

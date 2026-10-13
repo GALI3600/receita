@@ -81,8 +81,9 @@
     @apply bg-danger text-white hover:bg-[#7f2222];
   }
 
+  /* Foco: o anel terracota de :focus-visible (como nos botões) além da borda colorida. */
   .field-input {
-    @apply block min-h-11 w-full rounded-lg border border-ink/55 bg-card px-3 py-2 text-base text-ink placeholder:text-ink-soft focus:border-terracotta focus:outline-none focus-visible:outline-3 focus-visible:outline-offset-1 focus-visible:outline-terracotta aria-invalid:border-danger;
+    @apply block min-h-11 w-full rounded-lg border border-ink/55 bg-card px-3 py-2 text-base text-ink placeholder:text-ink-soft focus:border-terracotta focus-visible:outline-3 focus-visible:outline-offset-1 focus-visible:outline-terracotta disabled:cursor-not-allowed disabled:bg-paper-deep disabled:opacity-70 aria-invalid:border-danger;
   }
 
   .link {
@@ -99,6 +100,16 @@
 
   .tag-chip {
     @apply inline-flex items-center rounded-full border border-line bg-paper px-2.5 py-0.5 text-sm text-ink-soft;
+  }
+  /* Tag clicável: 36px visíveis e uma área de toque de 44px (pseudo-elemento, 4px para cima e
+     para baixo, que cabe no espaço de 8px entre as linhas de tags). */
+  .tag-chip-action {
+    @apply relative min-h-9 px-3 py-1 transition-colors;
+  }
+  .tag-chip-action::after {
+    content: '';
+    position: absolute;
+    inset: -4px 0;
   }
 
   .ornament {
@@ -122,9 +133,22 @@
   }
 }
 
+/* Celular e tablet: o player fixo no topo não pode cobrir o que recebe foco pelo teclado. */
+@media (max-width: 1023.98px) {
+  html:has([data-sticky-player='true']) {
+    scroll-padding-top: calc(min(35dvh, 56.25vw) + 2rem);
+  }
+}
+
 @media print {
   body {
     background: white;
+  }
+  .recipe-aside,
+  .recipe-ingredients {
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
   }
   .page-sheet {
     box-shadow: none;

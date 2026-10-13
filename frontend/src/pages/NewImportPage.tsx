@@ -9,7 +9,12 @@ import { ImportProgress } from '../components/ImportProgress'
 import { ResendVerification } from '../components/ResendVerification'
 import { Alert, Field, LoadingPage } from '../components/ui'
 import { describeError } from '../lib/errors'
-import { formatDateTime, validateYoutubeLink, youtubeThumbnail } from '../lib/format'
+import {
+  formatDateTime,
+  validateYoutubeLink,
+  youtubeThumbnail,
+  youtubeWatchUrl,
+} from '../lib/format'
 import { statusAnnouncement } from '../lib/importStatus'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useCurrentUser } from '../session/context'
@@ -61,7 +66,13 @@ function VideoBadge({ imp }: { imp: ImportOut }) {
         alt=""
         className="h-14 w-24 shrink-0 rounded object-cover shadow-cover"
       />
-      <a href={imp.url} target="_blank" rel="noreferrer" className="link min-w-0 break-all text-sm">
+      {/* O endereço vem do youtube_id validado; o texto mostra o link como a pessoa colou. */}
+      <a
+        href={youtubeWatchUrl(imp.youtube_id)}
+        target="_blank"
+        rel="noreferrer"
+        className="link min-w-0 break-all text-sm"
+      >
         {imp.url}
       </a>
     </div>
@@ -165,6 +176,16 @@ export function NewImportPage() {
     })
   }
 
+  // 4xx (import inexistente, de outra conta, id inválido): tentar de novo não adianta.
+  const notRetryable =
+    current.isError &&
+    isApiError(current.error) &&
+    current.error.status >= 400 &&
+    current.error.status < 500
+  // Falha passageira (rede, 5xx) com o import já carregado: o progresso continua na tela.
+  const reconnecting = Boolean(current.data) && (current.isError || current.failureCount > 0)
+  const verified = user.email_verified
+
   const createError = create.error
   const notVerifiedError = isApiError(createError, 'email_not_verified')
   const limitError =
@@ -184,51 +205,74 @@ export function NewImportPage() {
 
       <div className="page-sheet mt-6 px-5 py-6 sm:px-8 sm:py-8">
         {importId ? (
-          current.isPending ? (
-            <LoadingPage label="Carregando a importação…" />
+          current.data ? (
+            <div className="space-y-5">
+              {reconnecting && (
+                <Alert tone="info" live="polite">
+                  Reconectando ao servidor… A importação continua rodando; o progresso volta a
+                  atualizar sozinho.
+                </Alert>
+              )}
+              <ImportStatusView imp={current.data} onReset={reset} />
+            </div>
           ) : current.isError ? (
             <div className="space-y-4">
               <Alert tone="error">{describeError(current.error)}</Alert>
-              <button type="button" className="btn-primary" onClick={reset}>
-                Importar outro vídeo
-              </button>
+              <div className="flex flex-wrap gap-3">
+                {!notRetryable && (
+                  <button type="button" className="btn-primary" onClick={() => current.refetch()}>
+                    Tentar de novo
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={notRetryable ? 'btn-primary' : 'btn-secondary'}
+                  onClick={reset}
+                >
+                  Importar outro vídeo
+                </button>
+              </div>
             </div>
           ) : (
-            <ImportStatusView imp={current.data} onReset={reset} />
+            <LoadingPage label="Carregando a importação…" />
           )
         ) : (
           <div className="space-y-5">
-            {!user.email_verified && <EmailNotVerified emphasis={notVerifiedError} />}
-            {user.email_verified && notVerifiedError && <EmailNotVerified emphasis />}
-            <form noValidate onSubmit={onSubmit} className="space-y-4">
-              <Field
-                label="Link do vídeo no YouTube"
-                name="url"
-                type="url"
-                inputMode="url"
-                autoComplete="off"
-                placeholder="https://www.youtube.com/watch?v=…"
-                value={url}
-                onChange={(e) => {
-                  setUrl(e.target.value)
-                  if (fieldError) setFieldError(null)
-                }}
-                error={fieldError}
-                hint="Funciona com links do youtube.com, youtu.be e Shorts."
-                required
-              />
-              {showGenericError && (
-                <Alert tone={limitError ? 'warning' : 'error'}>{describeError(createError)}</Alert>
-              )}
-              <button
-                type="submit"
-                className="btn-primary w-full sm:w-auto"
-                disabled={create.isPending}
-              >
-                {create.isPending ? 'Enviando…' : 'Importar receita'}
-              </button>
+            {(!verified || notVerifiedError) && <EmailNotVerified emphasis={notVerifiedError} />}
+            <form noValidate onSubmit={onSubmit}>
+              {/* Sem e-mail confirmado o envio fica desligado: o servidor recusaria (403). */}
+              <fieldset disabled={!verified} className="min-w-0 space-y-4">
+                <Field
+                  label="Link do vídeo no YouTube"
+                  name="url"
+                  type="url"
+                  inputMode="url"
+                  autoComplete="off"
+                  placeholder="https://www.youtube.com/watch?v=…"
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.target.value)
+                    if (fieldError) setFieldError(null)
+                  }}
+                  error={fieldError}
+                  hint="Funciona com links do youtube.com, youtu.be e Shorts."
+                  required
+                />
+                {showGenericError && (
+                  <Alert tone={limitError ? 'warning' : 'error'}>
+                    {describeError(createError)}
+                  </Alert>
+                )}
+                <button
+                  type="submit"
+                  className="btn-primary w-full sm:w-auto"
+                  disabled={create.isPending}
+                >
+                  {create.isPending ? 'Enviando…' : 'Importar receita'}
+                </button>
+              </fieldset>
             </form>
-            <QuotaNote quota={user.quota} />
+            {verified && <QuotaNote quota={user.quota} />}
           </div>
         )}
       </div>

@@ -18,14 +18,19 @@ function SessionError() {
   )
 }
 
-/** Rota que exige login: sem sessão, vai para /entrar?next=<caminho atual>. */
+/**
+ * Rota que exige login: sem sessão, vai para /entrar?next=<caminho atual> (ou para a
+ * apresentação, logo depois de a pessoa sair da conta).
+ */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  const { status } = useSession()
+  const { status, signedOut } = useSession()
   const location = useLocation()
   if (status === 'loading') return <LoadingPage />
   if (status === 'error') return <SessionError />
   if (status === 'anonymous') {
-    return <Navigate to={loginPath(location.pathname + location.search)} replace />
+    // Quem acabou de sair vai para a apresentação; sessão expirada, para o login (com volta).
+    const target = signedOut ? '/' : loginPath(location.pathname + location.search)
+    return <Navigate to={target} replace />
   }
   return children
 }

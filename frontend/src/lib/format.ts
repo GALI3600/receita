@@ -61,6 +61,32 @@ export function youtubeThumbnail(youtubeId: string, quality: 'hq' | 'mq' | 'sd' 
   return `https://i.ytimg.com/vi/${encodeURIComponent(youtubeId)}/${quality}default.jpg`
 }
 
+const THUMBNAIL_HOSTS = new Set(['i.ytimg.com', 'i9.ytimg.com'])
+
+/**
+ * Thumbnail salva para o vídeo (vem do yt-dlp) só se for https em i.ytimg.com; qualquer outra
+ * coisa é trocada pela montada a partir do youtube_id.
+ */
+export function safeThumbnail(url: string | null | undefined, youtubeId: string): string {
+  if (url) {
+    try {
+      const parsed = new URL(url)
+      if (
+        parsed.protocol === 'https:' &&
+        THUMBNAIL_HOSTS.has(parsed.hostname) &&
+        !parsed.port &&
+        !parsed.username &&
+        !parsed.password
+      ) {
+        return parsed.href
+      }
+    } catch {
+      // URL inválida: usa a montada pelo id.
+    }
+  }
+  return youtubeThumbnail(youtubeId)
+}
+
 export function youtubeWatchUrl(youtubeId: string, seconds?: number | null): string {
   const t = seconds ? `&t=${Math.floor(seconds)}s` : ''
   return `https://www.youtube.com/watch?v=${encodeURIComponent(youtubeId)}${t}`

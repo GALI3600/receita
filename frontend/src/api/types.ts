@@ -120,6 +120,11 @@ export interface Recipe extends RecipeSummary {
   user_notes: string | null
 }
 
+/** GET /recipes/tags: as tags do livro, com quantas receitas usam cada uma. */
+export interface RecipeTags {
+  tags: Array<{ name: string; count: number }>
+}
+
 export interface RecipePage {
   items: RecipeSummary[]
   /** Passe em `cursor` para buscar a próxima página; null na última. */

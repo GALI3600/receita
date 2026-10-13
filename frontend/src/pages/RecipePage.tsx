@@ -9,12 +9,10 @@ import { DifficultyBadge, HeartIcon } from '../components/recipe/RecipeMeta'
 import { StepList } from '../components/recipe/StepList'
 import { Alert, LoadingPage } from '../components/ui'
 import { YouTubePlayer, type YouTubePlayerHandle } from '../components/youtube/YouTubePlayer'
+import { isPlayerUnavailable, type PlayerStatus } from '../components/youtube/playerStatus'
 import { describeError } from '../lib/errors'
 import { formatMinutes, totalMinutes, youtubeWatchUrl } from '../lib/format'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
-
-/** No celular o player fica no fluxo da página: ao pular para um passo, rolamos até ele. */
-const SINGLE_COLUMN_QUERY = '(max-width: 1023px)'
 
 function TimeFacts({ recipe }: { recipe: Recipe }) {
   const total = totalMinutes(recipe)
@@ -47,8 +45,8 @@ function TimeFacts({ recipe }: { recipe: Recipe }) {
           <dt className="text-xs font-semibold tracking-wider text-ink-soft uppercase">
             Dificuldade
           </dt>
-          <dd className="font-serif text-lg" aria-hidden="false">
-            <DifficultyBadge difficulty={recipe.difficulty} />
+          <dd className="font-serif text-lg">
+            <DifficultyBadge difficulty={recipe.difficulty} srLabel={false} />
           </dd>
         </div>
       )}
@@ -61,10 +59,18 @@ function DeleteRecipe({ recipe }: { recipe: Recipe }) {
   const remove = useDeleteRecipe(recipe.id)
   const [confirming, setConfirming] = useState(false)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const deleteRef = useRef<HTMLButtonElement>(null)
+
+  function cancel() {
+    setConfirming(false)
+    // O foco volta para "Excluir" (o botão "Cancelar" some da página).
+    requestAnimationFrame(() => deleteRef.current?.focus())
+  }
 
   if (!confirming) {
     return (
       <button
+        ref={deleteRef}
         type="button"
         className="btn-ghost text-danger hover:text-danger"
         onClick={() => {
@@ -81,6 +87,9 @@ function DeleteRecipe({ recipe }: { recipe: Recipe }) {
     <div
       role="alertdialog"
       aria-labelledby="confirmar-exclusao"
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !remove.isPending) cancel()
+      }}
       className="w-full rounded-lg border border-danger/40 bg-danger-tint p-4 sm:w-auto"
     >
       <p id="confirmar-exclusao" className="font-semibold">
@@ -104,12 +113,7 @@ function DeleteRecipe({ recipe }: { recipe: Recipe }) {
         >
           {remove.isPending ? 'Excluindo…' : 'Sim, excluir'}
         </button>
-        <button
-          ref={cancelRef}
-          type="button"
-          className="btn-secondary"
-          onClick={() => setConfirming(false)}
-        >
+        <button ref={cancelRef} type="button" className="btn-secondary" onClick={cancel}>
           Cancelar
         </button>
       </div>
@@ -121,14 +125,16 @@ function RecipeView({ recipe }: { recipe: Recipe }) {
   const location = useLocation()
   const playerRef = useRef<YouTubePlayerHandle>(null)
   const [activeStep, setActiveStep] = useState<number | null>(null)
+  const [playerStatus, setPlayerStatus] = useState<PlayerStatus>('loading')
   const update = useUpdateRecipe(recipe.id)
   const justImported = (location.state as { imported?: boolean } | null)?.imported === true
+  // Sem vídeo, os tempos dos passos viram texto e o player deixa de ficar fixo no celular.
+  const videoUnavailable = isPlayerUnavailable(playerStatus)
 
   function seekToStep(step: Step) {
     if (step.video_timestamp_s === null) return
     setActiveStep(step.order)
     playerRef.current?.seekTo(step.video_timestamp_s)
-    if (window.matchMedia?.(SINGLE_COLUMN_QUERY).matches) playerRef.current?.scrollIntoView()
   }
 
   return (
@@ -144,7 +150,7 @@ function RecipeView({ recipe }: { recipe: Recipe }) {
         </Alert>
       )}
 
-      <div className="page-sheet relative px-4 py-6 sm:px-8 sm:py-10 lg:px-12">
+      <div className="page-sheet relative px-3 py-6 sm:px-8 sm:py-10 lg:px-12">
         <header className="max-w-3xl">
           {recipe.tags.length > 0 && (
             <p className="eyebrow">{recipe.tags.slice(0, 3).join(' · ')}</p>
@@ -190,33 +196,60 @@ function RecipeView({ recipe }: { recipe: Recipe }) {
           )}
         </header>
 
-        <div className="mt-8 grid gap-10 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:gap-12">
-          <div className="space-y-8 lg:sticky lg:top-4 lg:self-start">
-            <div className="print:hidden">
-              <YouTubePlayer
-                ref={playerRef}
-                videoId={recipe.video.youtube_id}
-                title={recipe.video.title}
-                thumbnailUrl={recipe.video.thumbnail_url}
-              />
+        {/*
+          Celular e tablet (uma coluna): o player fica fixo no topo enquanto se lê a receita; a
+          coluna da esquerda vira `contents` para o player poder grudar ao longo da página toda.
+          Desktop: player e ingredientes fixos à esquerda; se não couberem na altura da tela, só a
+          lista de ingredientes rola, e o player continua à vista.
+        */}
+        <div className="mt-8 lg:grid lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:gap-12">
+          <div className="recipe-aside max-lg:contents lg:sticky lg:top-4 lg:flex lg:max-h-[calc(100dvh-2rem)] lg:flex-col lg:gap-8 lg:self-start">
+            <div
+              data-sticky-player={!videoUnavailable}
+              className={`print:hidden lg:shrink-0 ${
+                videoUnavailable
+                  ? ''
+                  : 'max-lg:sticky max-lg:top-0 max-lg:z-20 max-lg:-mx-3 max-lg:border-b max-lg:border-line max-lg:bg-card max-lg:px-3 max-lg:py-2 sm:max-lg:-mx-8 sm:max-lg:px-8'
+              }`}
+            >
+              <div className="mx-auto max-lg:max-w-[calc(35dvh*16/9)]">
+                <YouTubePlayer
+                  ref={playerRef}
+                  videoId={recipe.video.youtube_id}
+                  title={recipe.video.title}
+                  thumbnailUrl={recipe.video.thumbnail_url}
+                  onStatusChange={setPlayerStatus}
+                />
+              </div>
             </div>
-            <section aria-labelledby="ingredientes">
+            <section
+              aria-labelledby="ingredientes"
+              className="max-lg:mt-8 lg:flex lg:min-h-0 lg:flex-col print:mt-8"
+            >
               <h2 id="ingredientes" className="mb-3 text-2xl font-semibold">
                 Ingredientes
               </h2>
-              <IngredientList ingredients={recipe.ingredients} />
+              <div className="recipe-ingredients lg:-mr-2 lg:min-h-0 lg:overflow-y-auto lg:pr-2">
+                <IngredientList ingredients={recipe.ingredients} />
+              </div>
             </section>
           </div>
 
-          <div className="space-y-10">
+          <div className="space-y-10 max-lg:mt-10 print:mt-10">
             <section aria-labelledby="preparo">
               <h2 id="preparo" className="mb-1 text-2xl font-semibold">
                 Modo de preparo
               </h2>
-              <p className="mb-4 text-sm text-ink-soft print:hidden">
-                Toque no tempo de um passo para ver esse momento no vídeo.
-              </p>
-              <StepList steps={recipe.steps} activeOrder={activeStep} onSeek={seekToStep} />
+              {!videoUnavailable && (
+                <p className="mb-4 text-sm text-ink-soft print:hidden">
+                  Toque no tempo de um passo para ver esse momento no vídeo.
+                </p>
+              )}
+              <StepList
+                steps={recipe.steps}
+                activeOrder={activeStep}
+                onSeek={videoUnavailable ? undefined : seekToStep}
+              />
             </section>
 
             {recipe.tips.length > 0 && (
@@ -245,7 +278,7 @@ function RecipeView({ recipe }: { recipe: Recipe }) {
                     <li key={tag}>
                       <Link
                         to={`/livro?tag=${encodeURIComponent(tag)}`}
-                        className="tag-chip hover:text-terracotta"
+                        className="tag-chip tag-chip-action hover:border-terracotta/50 hover:text-terracotta"
                       >
                         #{tag}
                       </Link>

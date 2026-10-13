@@ -43,13 +43,13 @@ export function RecipeCard({ recipe, onTagClick }: RecipeCardProps) {
         </h2>
         <RecipeMeta recipe={recipe} />
         {recipe.tags.length > 0 && (
-          <ul className="relative z-10 mt-auto flex flex-wrap gap-1.5 pt-1" aria-label="Tags">
+          <ul className="relative z-10 mt-auto flex flex-wrap gap-2 pt-1" aria-label="Tags">
             {recipe.tags.slice(0, 4).map((tag) => (
               <li key={tag}>
                 {onTagClick ? (
                   <button
                     type="button"
-                    className="tag-chip hover:border-terracotta/50 hover:text-terracotta"
+                    className="tag-chip tag-chip-action hover:border-terracotta/50 hover:text-terracotta"
                     onClick={() => onTagClick(tag)}
                     aria-label={`Filtrar pela tag ${tag}`}
                   >

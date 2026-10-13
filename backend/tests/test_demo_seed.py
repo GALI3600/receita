@@ -22,6 +22,11 @@ def test_demo_recipes_follow_the_llm_schema() -> None:
         assert orders == list(range(1, len(orders) + 1))
         timestamps = [s.video_timestamp_s for s in recipe.steps if s.video_timestamp_s is not None]
         assert all(0 <= t < video.duration_s for t in timestamps)
+        # Contáveis sem unidade concordam com a quantidade: "3 cenouras", "4 ovos".
+        for ingredient in recipe.ingredients:
+            if ingredient.unit is None and (ingredient.quantity or "").isdigit():
+                if int(ingredient.quantity or "0") > 1:
+                    assert ingredient.name.split()[0].endswith("s"), ingredient.name
 
 
 async def test_seed_demo_fills_the_users_book(client: AsyncClient, session: AsyncSession) -> None:

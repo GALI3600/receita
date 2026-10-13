@@ -7,6 +7,7 @@ import type {
   Recipe,
   RecipeFilters,
   RecipePage,
+  RecipeTags,
   RecipeUpdate,
   RegisterIn,
 } from './types'
@@ -44,6 +45,7 @@ export const recipesApi = {
       },
       signal,
     }),
+  tags: (signal?: AbortSignal) => apiFetch<RecipeTags>('/recipes/tags', { signal }),
   get: (id: string, signal?: AbortSignal) =>
     apiFetch<Recipe>(`/recipes/${encodeURIComponent(id)}`, { signal }),
   update: (id: string, body: RecipeUpdate) =>

@@ -71,6 +71,15 @@ class VideoOut(BaseModel):
     duration_s: int
 
 
+class RecipeTag(BaseModel):
+    name: str
+    count: int
+
+
+class RecipeTags(BaseModel):
+    tags: list[RecipeTag]
+
+
 class RecipeSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

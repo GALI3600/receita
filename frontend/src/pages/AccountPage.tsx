@@ -1,7 +1,9 @@
-import { useNavigate } from 'react-router-dom'
+import { useState } from 'react'
 
 import { ACCOUNT_EXPORT_URL } from '../api/endpoints'
 import { ResendVerification } from '../components/ResendVerification'
+import { Alert } from '../components/ui'
+import { describeError } from '../lib/errors'
 import { formatDate, formatDateTime } from '../lib/format'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
 import { useCurrentUser, useSession } from '../session/context'
@@ -10,13 +12,18 @@ export function AccountPage() {
   useDocumentTitle('Minha conta')
   const user = useCurrentUser()
   const { logout, isLoggingOut } = useSession()
-  const navigate = useNavigate()
+  const [logoutError, setLogoutError] = useState<unknown>(null)
   const { quota } = user
   const usedPercent = quota.limit > 0 ? Math.min(100, (quota.used / quota.limit) * 100) : 100
 
+  // Com sucesso, a sessão acaba e <RequireAuth> leva para a apresentação.
   async function onLogout() {
-    await logout()
-    navigate('/', { replace: true })
+    setLogoutError(null)
+    try {
+      await logout()
+    } catch (error) {
+      setLogoutError(error)
+    }
   }
 
   return (
@@ -92,6 +99,11 @@ export function AccountPage() {
       </section>
 
       <div className="mt-8 text-center">
+        {logoutError !== null && (
+          <Alert tone="error" title="Não conseguimos sair da conta" className="mb-4 text-left">
+            {describeError(logoutError)} Sua sessão continua aberta neste navegador; tente de novo.
+          </Alert>
+        )}
         <button type="button" className="btn-secondary" onClick={onLogout} disabled={isLoggingOut}>
           {isLoggingOut ? 'Saindo…' : 'Sair da conta'}
         </button>

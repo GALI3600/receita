@@ -63,6 +63,7 @@ npm run dev
 | POST | `/imports` `{url}` | Valida o link e enfileira (202). Se a receita já existe (no livro ou de outro usuário), conclui na hora (200). Exige e-mail confirmado |
 | GET | `/imports/{id}` | `status` (`pending` → `fetching` → `transcribing` → `generating` → `done`/`failed`, ou `deferred`), `recipe_id`, `error` (o motivo da falha ou, em `deferred`, da espera) e `queue_position` |
 | GET | `/recipes?q=&tag=&favorite=&limit=&cursor=` | Livro do usuário, mais recentes primeiro; `q` busca no título, ingredientes e tags, sem diferenciar acentos |
+| GET | `/recipes/tags` | Todas as tags do livro, em ordem alfabética, com quantas receitas usam cada uma (`{"tags": [{"name", "count"}]}`) |
 | GET | `/recipes/{id}` | Receita + vídeo (`youtube_id`, título, canal, thumbnail, duração) |
 | PATCH | `/recipes/{id}` | Edita os campos enviados, `is_favorite`, `user_notes` e `rating` (1–5) |
 | DELETE | `/recipes/{id}` | Remove do livro |
@@ -130,7 +131,13 @@ React + TypeScript + Vite, Tailwind, React Router e TanStack Query. Rotas: `/` (
   (`code`, `message`, `status`, `retryAfter`).
 - Com `VITE_TURNSTILE_SITE_KEY` definido, o cadastro mostra o captcha do Cloudflare Turnstile.
 - A página da receita usa a YouTube IFrame Player API (`youtube-nocookie.com`): o tempo de cada
-  passo leva o vídeo àquele momento.
+  passo leva o vídeo àquele momento. No celular e no tablet (uma coluna) o player fica fixo no
+  topo enquanto se lê a receita, como pede o plano; no desktop, player e ingredientes ficam fixos
+  à esquerda e, se não couberem na altura da tela, só a lista de ingredientes rola. Se o vídeo
+  estiver indisponível, os tempos dos passos viram texto.
+- Os links de confirmação e de redefinição de senha têm o token tirado da barra de endereço assim
+  que a página abre, e o `index.html` define `Referrer-Policy: strict-origin-when-cross-origin`
+  (o proxy de produção deve mandar o mesmo header).
 
 ### Receitas de demonstração
 

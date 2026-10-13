@@ -18,11 +18,16 @@ export const queryKeys = {
   recipes: ['recipes'] as const,
   recipeList: (filters: RecipeFilters) => ['recipes', 'list', filters] as const,
   recipe: (id: string) => ['recipes', 'detail', id] as const,
+  recipeTags: ['recipes', 'tags'] as const,
+}
+
+function isClientError(error: unknown): boolean {
+  return error instanceof ApiError && error.status >= 400 && error.status < 500
 }
 
 function shouldRetry(failureCount: number, error: unknown): boolean {
   // Erros do cliente (4xx) não melhoram tentando de novo; rede e 5xx, até duas vezes.
-  if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false
+  if (isClientError(error)) return false
   return failureCount < 2
 }
 
@@ -32,8 +37,15 @@ export function createQueryClient(): QueryClient {
     queryCache: new QueryCache({ onError: (error) => handleUnauthorized(client, error) }),
     mutationCache: new MutationCache({ onError: (error) => handleUnauthorized(client, error) }),
     defaultOptions: {
-      queries: { retry: shouldRetry, refetchOnWindowFocus: false, staleTime: 15_000 },
-      mutations: { retry: false },
+      // networkMode 'always': sem internet o fetch falha na hora e vira ApiError network_error
+      // (com mensagem), em vez de o pedido ficar pausado sem aviso até a conexão voltar.
+      queries: {
+        retry: shouldRetry,
+        refetchOnWindowFocus: false,
+        staleTime: 15_000,
+        networkMode: 'always',
+      },
+      mutations: { retry: false, networkMode: 'always' },
     },
   })
   return client
@@ -58,7 +70,12 @@ export async function fetchMe(signal?: AbortSignal): Promise<Me | null> {
 }
 
 export function useMe() {
-  return useQuery({ queryKey: queryKeys.me, queryFn: ({ signal }) => fetchMe(signal) })
+  return useQuery({
+    queryKey: queryKeys.me,
+    queryFn: ({ signal }) => fetchMe(signal),
+    // Voltar para a aba atualiza a cota e a confirmação do e-mail feitas em outra aba.
+    refetchOnWindowFocus: true,
+  })
 }
 
 export function useLogin() {
@@ -73,13 +90,25 @@ export function useLogin() {
   })
 }
 
+/** Esquece a sessão no cliente: o usuário vira anônimo e o cache dele some. */
+export function clearSession(client: QueryClient) {
+  client.removeQueries({ predicate: (query) => query.queryKey[0] !== 'me' })
+  client.setQueryData(queryKeys.me, null)
+}
+
+/**
+ * POST /auth/logout. Não mexe no cache: quem chama (SessionProvider) limpa a sessão só depois
+ * do sucesso. 401 conta como sucesso (a sessão já tinha acabado); outros erros (rede, 5xx)
+ * deixam o cookie valendo, então a interface continua logada e mostra o erro.
+ */
 export function useLogout() {
-  const client = useQueryClient()
   return useMutation({
-    mutationFn: authApi.logout,
-    onSettled: () => {
-      client.removeQueries({ predicate: (query) => query.queryKey[0] !== 'me' })
-      client.setQueryData(queryKeys.me, null)
+    mutationFn: async () => {
+      try {
+        await authApi.logout()
+      } catch (error) {
+        if (!(error instanceof ApiError && error.status === 401)) throw error
+      }
     },
   })
 }
@@ -125,10 +154,20 @@ export function useCreateImport() {
       void client.invalidateQueries({ queryKey: queryKeys.me })
       if (imp.status === 'done') void client.invalidateQueries({ queryKey: queryKeys.recipes })
     },
+    onError: (error) => {
+      // Cota ou limite atingidos (talvez em outra aba): a cota mostrada precisa acompanhar.
+      if (error instanceof ApiError && error.status === 429) {
+        void client.invalidateQueries({ queryKey: queryKeys.me })
+      }
+    },
   })
 }
 
-/** Acompanha um import com polling adaptativo (para sozinho em done/failed). */
+/**
+ * Acompanha um import com polling adaptativo. Para sozinho em done/failed, num erro 4xx (import
+ * inexistente, de outra conta ou id inválido) e num erro sem nada carregado; uma falha
+ * passageira (rede, 5xx) depois de já ter o import continua tentando no ritmo normal.
+ */
 export function useImport(id: string | null) {
   return useQuery({
     queryKey: queryKeys.import(id ?? ''),
@@ -137,6 +176,9 @@ export function useImport(id: string | null) {
     staleTime: 0,
     refetchInterval: (query) => {
       const imp = query.state.data as ImportOut | undefined
+      if (query.state.status === 'error' && (!imp || isClientError(query.state.error))) {
+        return false
+      }
       // Tempo desde a criação do import: o ritmo continua certo mesmo depois de recarregar.
       const elapsed = imp ? Date.now() - Date.parse(imp.created_at) : 0
       return pollInterval(imp, elapsed)
@@ -153,6 +195,15 @@ export function useRecipes(filters: RecipeFilters) {
     queryFn: ({ pageParam, signal }) => recipesApi.list(filters, pageParam, signal),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage: RecipePage) => lastPage.next_cursor,
+  })
+}
+
+/** Todas as tags do livro (para o filtro), independentes da busca e da paginação. */
+export function useRecipeTags() {
+  return useQuery({
+    queryKey: queryKeys.recipeTags,
+    queryFn: ({ signal }) => recipesApi.tags(signal),
+    select: (data) => data.tags.map((tag) => tag.name),
   })
 }
 
@@ -183,7 +234,11 @@ export function useUpdateRecipe(id: string) {
       if (context?.previous) client.setQueryData(queryKeys.recipe(id), context.previous)
     },
     onSuccess: (recipe) => client.setQueryData(queryKeys.recipe(id), recipe),
-    onSettled: () => client.invalidateQueries({ queryKey: ['recipes', 'list'] }),
+    onSettled: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: ['recipes', 'list'] }),
+        client.invalidateQueries({ queryKey: queryKeys.recipeTags }),
+      ]),
   })
 }
 
@@ -194,6 +249,7 @@ export function useDeleteRecipe(id: string) {
     onSuccess: () => {
       client.removeQueries({ queryKey: queryKeys.recipe(id) })
       void client.invalidateQueries({ queryKey: ['recipes', 'list'] })
+      void client.invalidateQueries({ queryKey: queryKeys.recipeTags })
     },
   })
 }

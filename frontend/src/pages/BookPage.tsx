@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 
-import { useRecipes } from '../api/queries'
+import { useRecipeTags, useRecipes } from '../api/queries'
 import type { RecipeFilters } from '../api/types'
 import { RecipeCard, RecipeCardSkeleton } from '../components/recipe/RecipeCard'
 import { HeartIcon } from '../components/recipe/RecipeMeta'
@@ -79,11 +79,14 @@ export function BookPage() {
   const hasFilters = Boolean(q || tag || favorite)
   const fetchMoreError = recipes.isFetchNextPageError ? recipes.error : null
 
+  // As opções vêm de todas as tags do livro (não só das receitas carregadas com a busca atual),
+  // com as das receitas na tela como reserva caso a lista de tags não carregue.
+  const bookTags = useRecipeTags()
   const tagOptions = useMemo(() => {
-    const all = new Set(items.flatMap((recipe) => recipe.tags))
+    const all = new Set([...(bookTags.data ?? []), ...items.flatMap((recipe) => recipe.tags)])
     if (tag) all.add(tag)
     return [...all].sort((a, b) => a.localeCompare(b, 'pt-BR'))
-  }, [items, tag])
+  }, [bookTags.data, items, tag])
 
   function updateParam(key: string, value: string | null) {
     setParams((current) => {
@@ -182,7 +185,11 @@ export function BookPage() {
           {q && <span className="tag-chip">“{q}”</span>}
           {tag && <span className="tag-chip">#{tag}</span>}
           {favorite && <span className="tag-chip">favoritas</span>}
-          <button type="button" className="link" onClick={clearFilters}>
+          <button
+            type="button"
+            className="link inline-flex min-h-11 items-center"
+            onClick={clearFilters}
+          >
             Limpar filtros
           </button>
         </div>

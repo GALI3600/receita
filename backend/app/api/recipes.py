@@ -14,7 +14,14 @@ from app.api.deps import CurrentUser, SessionDep
 from app.errors import InvalidCursorError, NoOriginalRecipeError, RecipeNotFoundError
 from app.models import Recipe, User, Video
 from app.schemas.errors import ErrorResponse
-from app.schemas.recipes import RecipeOut, RecipePage, RecipeSummary, RecipeUpdate
+from app.schemas.recipes import (
+    RecipeOut,
+    RecipePage,
+    RecipeSummary,
+    RecipeTag,
+    RecipeTags,
+    RecipeUpdate,
+)
 from app.schemas.text import NulFreeStr
 from app.services.imports import recipe_fields
 
@@ -115,6 +122,25 @@ async def list_recipes(
         items=[RecipeSummary.model_validate(recipe) for recipe in recipes],
         next_cursor=_encode_cursor(recipes[-1]) if has_more else None,
     )
+
+
+MAX_TAGS_LISTED = 500
+
+
+@router.get("/tags", response_model=RecipeTags)
+async def list_tags(user: CurrentUser, session: SessionDep) -> RecipeTags:
+    """Todas as tags do livro do usuário (para o filtro), com quantas receitas usam cada uma."""
+    tags = (
+        select(func.unnest(Recipe.tags).label("name")).where(Recipe.user_id == user.id).subquery()
+    )
+    rows = await session.execute(
+        select(tags.c.name, func.count().label("count"))
+        .group_by(tags.c.name)
+        .order_by(tags.c.name)
+        .limit(MAX_TAGS_LISTED)
+    )
+    await session.commit()
+    return RecipeTags(tags=[RecipeTag(name=name, count=count) for name, count in rows])
 
 
 @router.get("/{recipe_id}", response_model=RecipeOut, responses=_NOT_FOUND)

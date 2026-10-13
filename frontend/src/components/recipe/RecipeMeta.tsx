@@ -12,7 +12,14 @@ function ClockIcon() {
 
 const DIFFICULTY_DOTS: Record<Difficulty, number> = { fácil: 1, média: 2, difícil: 3 }
 
-export function DifficultyBadge({ difficulty }: { difficulty: Difficulty }) {
+/** `srLabel={false}` quando um rótulo visível já diz "Dificuldade" (ex.: o <dt> da receita). */
+export function DifficultyBadge({
+  difficulty,
+  srLabel = true,
+}: {
+  difficulty: Difficulty
+  srLabel?: boolean
+}) {
   const dots = DIFFICULTY_DOTS[difficulty]
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -25,7 +32,7 @@ export function DifficultyBadge({ difficulty }: { difficulty: Difficulty }) {
         ))}
       </span>
       <span>
-        <span className="sr-only">Dificuldade: </span>
+        {srLabel && <span className="sr-only">Dificuldade: </span>}
         <span className="first-letter:uppercase">{difficulty}</span>
       </span>
     </span>

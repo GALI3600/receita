@@ -24,8 +24,9 @@ export function IngredientList({ ingredients }: { ingredients: Ingredient[] }) {
 
   return (
     <div className="space-y-5">
-      {groups.map(({ group, items }) => {
-        const headingId = `${baseId}-${group ?? 'geral'}`
+      {groups.map(({ group, items }, groupIndex) => {
+        // Pelo índice, não pelo nome: um nome com espaço ("para enrolar") viraria dois ids.
+        const headingId = `${baseId}-grupo-${groupIndex}`
         return (
           <section key={group ?? ''} aria-labelledby={group ? headingId : undefined}>
             {group && (
@@ -45,7 +46,7 @@ export function IngredientList({ ingredients }: { ingredients: Ingredient[] }) {
                   <li key={index}>
                     <label
                       htmlFor={inputId}
-                      className="flex cursor-pointer items-start gap-3 rounded-md px-1 py-1.5 hover:bg-paper-deep"
+                      className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md px-1 py-2.5 hover:bg-paper-deep"
                     >
                       <input
                         id={inputId}

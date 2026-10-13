@@ -14,9 +14,9 @@ export function LocationProbe() {
 
 export function renderApp(routes: ReactElement, { route = '/' }: { route?: string } = {}) {
   const client = createQueryClient()
-  client.setDefaultOptions({
-    queries: { ...client.getDefaultOptions().queries, retry: false },
-  })
+  // setDefaultOptions troca tudo: mantém as opções das mutations do app.
+  const defaults = client.getDefaultOptions()
+  client.setDefaultOptions({ ...defaults, queries: { ...defaults.queries, retry: false } })
   const result = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[route]}>

@@ -333,6 +333,43 @@ async def test_list_pagination(client: AsyncClient, session: AsyncSession) -> No
     assert second["next_cursor"] is None
 
 
+async def test_tags_lists_the_whole_book_with_counts(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    user, other = await make_user(session), await make_user(session, "Bia")
+    await _book(session, user)
+    extra = await make_video(session, youtube_id(10))
+    await make_recipe(session, user, extra, tags=["lanche", "sobremesa"])
+    await make_recipe(session, user, await make_video(session, youtube_id(11)), tags=[])
+    await make_recipe(session, other, await make_video(session, youtube_id(12)), tags=["alheia"])
+
+    response = await client.get("/recipes/tags", headers=headers(user))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "tags": [
+            {"name": "almoço", "count": 1},
+            {"name": "lanche", "count": 2},
+            {"name": "mineira", "count": 1},
+            {"name": "sobremesa", "count": 2},
+        ]
+    }
+    other_tags = (await client.get("/recipes/tags", headers=headers(other))).json()
+    assert other_tags == {"tags": [{"name": "alheia", "count": 1}]}
+
+
+async def test_tags_of_an_empty_book_and_without_session(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    user = await make_user(session)
+
+    response = await client.get("/recipes/tags", headers=headers(user))
+    assert response.status_code == 200
+    assert response.json() == {"tags": []}
+
+    assert (await client.get("/recipes/tags")).status_code == 401
+
+
 async def test_list_invalid_params(client: AsyncClient, session: AsyncSession) -> None:
     user = await make_user(session)
 

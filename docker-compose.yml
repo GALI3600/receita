@@ -86,6 +86,8 @@ services:
     build: ./frontend
     environment:
       API_URL: http://api:8000
+      # O bind mount de /mnt/c (WSL2) não propaga eventos do inotify: o Vite observa por polling.
+      VITE_USE_POLLING: "true"
       # Chave pública do Cloudflare Turnstile; vazia, o cadastro não mostra captcha.
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
     ports:

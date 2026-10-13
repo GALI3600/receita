@@ -28,6 +28,13 @@ describe('safeNext', () => {
     '/entrar?next=/conta',
     '/cadastro',
     `/${'a'.repeat(3000)}`,
+    // Normalizam para "//host" (protocol-relative) depois de resolver "." e "..".
+    '/.//evil.example',
+    '/..//evil.example',
+    '/a/..//evil.example/x',
+    '/%2e//evil.example',
+    '/%2E%2E//evil.example',
+    '/./\\evil.example',
   ])('recusa %s', (next) => {
     expect(safeNext(next)).toBe(DEFAULT_AFTER_LOGIN)
   })

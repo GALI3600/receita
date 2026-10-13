@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 
 import { useSession } from '../session/context'
+import { ErrorBoundary } from './ErrorBoundary'
 
 function BookMark() {
   return (
@@ -20,7 +21,7 @@ function BookMark() {
 }
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
-  `rounded-full px-3 py-2 font-semibold transition-colors ${
+  `inline-flex min-h-11 items-center rounded-full px-3 py-2 font-semibold transition-colors ${
     isActive ? 'bg-paper-deep text-ink' : 'text-ink-soft hover:bg-paper-deep hover:text-ink'
   }`
 
@@ -52,7 +53,7 @@ export function Layout() {
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-3">
           <Link
             to={status === 'authenticated' ? '/livro' : '/'}
-            className="flex items-center gap-2 text-terracotta"
+            className="flex items-center gap-2 py-1.5 text-terracotta"
           >
             <BookMark />
             <span className="font-serif text-2xl font-semibold text-ink">Receita</span>
@@ -86,7 +87,7 @@ export function Layout() {
                   </NavLink>
                 </li>
                 <li>
-                  <Link to="/cadastro" className="btn-primary min-h-10 px-4">
+                  <Link to="/cadastro" className="btn-primary px-4">
                     Criar conta
                   </Link>
                 </li>
@@ -96,7 +97,10 @@ export function Layout() {
         </div>
       </header>
       <main id="conteudo" ref={mainRef} tabIndex={-1} className="flex-1 focus:outline-none">
-        <Outlet />
+        {/* A chave reinicia a página de erro ao navegar para outra rota. */}
+        <ErrorBoundary key={location.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
       <footer className="border-t border-line/80 px-4 py-6 text-center text-sm text-ink-soft print:hidden">
         <p>Receita · seu livro de receitas a partir de vídeos do YouTube</p>

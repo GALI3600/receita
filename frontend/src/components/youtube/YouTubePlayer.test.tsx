@@ -69,7 +69,11 @@ describe('YouTubePlayer', () => {
 
   it.each([100, 101, 150])('mostra a thumbnail e "vídeo indisponível" no erro %i', async (code) => {
     render(
-      <YouTubePlayer videoId="abcdefghijk" title="Bolo" thumbnailUrl="https://i.ytimg.com/x.jpg" />,
+      <YouTubePlayer
+        videoId="abcdefghijk"
+        title="Bolo"
+        thumbnailUrl="https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg"
+      />,
     )
     await waitFor(() => expect(FakePlayer.active).toHaveLength(1))
 
@@ -78,7 +82,7 @@ describe('YouTubePlayer', () => {
     expect(await screen.findByText('Vídeo indisponível')).toBeInTheDocument()
     expect(screen.getByAltText('Capa do vídeo Bolo')).toHaveAttribute(
       'src',
-      'https://i.ytimg.com/x.jpg',
+      'https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg',
     )
   })
 
@@ -94,5 +98,37 @@ describe('YouTubePlayer', () => {
       'data-player-status',
       'ready',
     )
+  })
+
+  it.each([
+    ['https://evil.example/x.jpg'],
+    ['http://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg'],
+    ['javascript:alert(1)'],
+  ])('thumbnail_url fora do i.ytimg.com (%s) é trocada pela do youtube_id', async (url) => {
+    render(<YouTubePlayer videoId="abcdefghijk" title="Bolo" thumbnailUrl={url} />)
+    await waitFor(() => expect(FakePlayer.active).toHaveLength(1))
+
+    FakePlayer.active[0].fail(100)
+
+    expect(await screen.findByAltText('Capa do vídeo Bolo')).toHaveAttribute(
+      'src',
+      'https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg',
+    )
+  })
+
+  it('avisa a página quando o vídeo fica indisponível', async () => {
+    const statuses: string[] = []
+    render(
+      <YouTubePlayer
+        videoId="abcdefghijk"
+        title="Bolo"
+        onStatusChange={(status) => statuses.push(status)}
+      />,
+    )
+    await waitFor(() => expect(FakePlayer.active).toHaveLength(1))
+    FakePlayer.active[0].ready()
+    FakePlayer.active[0].fail(101)
+
+    await waitFor(() => expect(statuses).toEqual(['loading', 'ready', 'unavailable']))
   })
 })

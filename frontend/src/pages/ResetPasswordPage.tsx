@@ -1,16 +1,16 @@
 import { useState, type FormEvent } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 
 import { isApiError } from '../api/client'
 import { useResetPassword } from '../api/queries'
 import { Alert, AuthCard, Field } from '../components/ui'
 import { MIN_PASSWORD, describeError, validateNewPassword } from '../lib/errors'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
+import { useTokenFromUrl } from '../lib/useTokenFromUrl'
 
 export function ResetPasswordPage() {
   useDocumentTitle('Nova senha')
-  const [params] = useSearchParams()
-  const token = params.get('token')
+  const token = useTokenFromUrl()
   const reset = useResetPassword()
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')

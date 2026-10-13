@@ -7,6 +7,9 @@ export type SessionStatus = 'loading' | 'authenticated' | 'anonymous' | 'error'
 export interface SessionValue {
   status: SessionStatus
   user: Me | null
+  /** Anônimo porque a pessoa saiu da conta agora (e não porque a sessão expirou). */
+  signedOut: boolean
+  /** Encerra a sessão; rejeita (e mantém a sessão) se o servidor não confirmar. */
   logout: () => Promise<void>
   isLoggingOut: boolean
   retry: () => void

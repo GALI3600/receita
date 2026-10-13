@@ -134,4 +134,124 @@ describe('RecipePage', () => {
       await screen.findByRole('heading', { name: 'Receita não encontrada' }),
     ).toBeInTheDocument()
   })
+
+  it('grupo de ingredientes com espaço no nome tem nome acessível', async () => {
+    const base = makeRecipe()
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes/rec-1': () =>
+        json(
+          200,
+          makeRecipe({
+            ingredients: [
+              ...base.ingredients,
+              {
+                name: 'nibs de cacau',
+                quantity: '1',
+                unit: 'xícara',
+                note: null,
+                group: 'para enrolar',
+              },
+            ],
+          }),
+        ),
+    })
+    renderRecipe()
+
+    const group = await screen.findByRole('region', { name: 'para enrolar' })
+    expect(within(group).getByRole('checkbox', { name: /nibs de cacau/ })).toBeInTheDocument()
+  })
+
+  it('vídeo indisponível: os tempos dos passos viram texto, sem botões inúteis', async () => {
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes/rec-1': () => json(200, makeRecipe()),
+    })
+    renderRecipe()
+    await waitFor(() => expect(FakePlayer.active).toHaveLength(1))
+    expect(screen.getByRole('button', { name: /Ver o passo 2 no vídeo/ })).toBeInTheDocument()
+
+    FakePlayer.active[0].fail(150)
+
+    expect(await screen.findByText('Vídeo indisponível')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /no vídeo, em/ })).not.toBeInTheDocument()
+    expect(screen.getByText('No vídeo em 1:53')).toBeInTheDocument()
+    expect(screen.queryByText(/Toque no tempo de um passo/)).not.toBeInTheDocument()
+  })
+
+  it('cancelar a exclusão devolve o foco ao botão Excluir', async () => {
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes/rec-1': () => json(200, makeRecipe()),
+    })
+    renderRecipe()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Excluir' }))
+    const cancel = within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancelar' })
+    await waitFor(() => expect(cancel).toHaveFocus())
+    await userEvent.keyboard('{Enter}')
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Excluir' })).toHaveFocus())
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  })
+
+  it('Esc também cancela a exclusão', async () => {
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes/rec-1': () => json(200, makeRecipe()),
+    })
+    renderRecipe()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Excluir' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancelar' })).toHaveFocus())
+    await userEvent.keyboard('{Escape}')
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Excluir' })).toHaveFocus())
+  })
+
+  it('a dificuldade é anunciada uma vez só nos dados da receita', async () => {
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes/rec-1': () => json(200, makeRecipe()),
+    })
+    renderRecipe()
+
+    const term = await screen.findByText('Dificuldade', { selector: 'dt' })
+    const value = term.nextElementSibling as HTMLElement
+    expect(value.tagName).toBe('DD')
+    expect(value).toHaveTextContent(/^fácil$/)
+    expect(value).not.toHaveAttribute('aria-hidden')
+  })
+
+  it('no celular, o player fica fixo no topo e escolher um passo não rola a página', async () => {
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes/rec-1': () => json(200, makeRecipe()),
+    })
+    const scrolls: Element[] = []
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolls.push(this)
+    }
+    try {
+      renderRecipe()
+      await waitFor(() => expect(FakePlayer.active).toHaveLength(1))
+      FakePlayer.active[0].ready()
+      const sticky = document.querySelector('[data-sticky-player]')
+      expect(sticky).toHaveAttribute('data-sticky-player', 'true')
+
+      await userEvent.click(screen.getByRole('button', { name: /Ver o passo 2 no vídeo/ }))
+      expect(scrolls).toHaveLength(0)
+
+      FakePlayer.active[0].fail(150)
+      await waitFor(() =>
+        expect(document.querySelector('[data-sticky-player]')).toHaveAttribute(
+          'data-sticky-player',
+          'false',
+        ),
+      )
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
+  })
 })

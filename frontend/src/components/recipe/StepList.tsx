@@ -22,13 +22,13 @@ export function StepList({ steps, activeOrder, onSeek }: StepListProps) {
           <li
             key={step.order}
             aria-current={active ? 'step' : undefined}
-            className={`flex gap-4 rounded-lg border px-3 py-3 transition-colors sm:px-4 ${
+            className={`flex gap-3 rounded-lg border px-2 py-3 transition-colors sm:gap-4 sm:px-4 ${
               active ? 'border-terracotta/50 bg-terracotta-tint' : 'border-transparent'
             }`}
           >
             <span
               aria-hidden="true"
-              className="w-8 shrink-0 text-right font-serif text-3xl leading-none font-semibold text-terracotta"
+              className="w-7 shrink-0 text-right font-serif text-2xl leading-none font-semibold text-terracotta sm:w-8 sm:text-3xl"
             >
               {step.order}
             </span>
@@ -40,7 +40,7 @@ export function StepList({ steps, activeOrder, onSeek }: StepListProps) {
                   <button
                     type="button"
                     onClick={() => onSeek(step)}
-                    className="mt-2 inline-flex min-h-9 items-center gap-1.5 rounded-full border border-terracotta/40 bg-card px-3 text-sm font-semibold text-terracotta hover:bg-terracotta-tint print:hidden"
+                    className="mt-2 inline-flex min-h-11 items-center gap-1.5 rounded-full border border-terracotta/40 bg-card px-3 text-sm font-semibold text-terracotta hover:bg-terracotta-tint print:hidden"
                     aria-label={`Ver o passo ${step.order} no vídeo, em ${formatTimestamp(time)}`}
                   >
                     <svg viewBox="0 0 16 16" className="size-3.5" aria-hidden="true">

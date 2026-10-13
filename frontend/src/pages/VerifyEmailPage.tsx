@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 
 import { useVerifyEmail } from '../api/queries'
 import { ResendVerification } from '../components/ResendVerification'
 import { Alert, AuthCard, Spinner } from '../components/ui'
 import { describeError } from '../lib/errors'
 import { useDocumentTitle } from '../lib/useDocumentTitle'
+import { useTokenFromUrl } from '../lib/useTokenFromUrl'
 import { useSession } from '../session/context'
 
 function ResendOrLogin() {
@@ -43,8 +44,7 @@ function ResendOrLogin() {
 
 export function VerifyEmailPage() {
   useDocumentTitle('Confirmar e-mail')
-  const [params] = useSearchParams()
-  const token = params.get('token')
+  const token = useTokenFromUrl()
   const verify = useVerifyEmail()
   const { status } = useSession()
   const requested = useRef<string | null>(null)

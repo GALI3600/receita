@@ -8,6 +8,7 @@ import { BrowserRouter } from 'react-router-dom'
 
 import App from './App.tsx'
 import { createQueryClient } from './api/queries'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import './index.css'
 import { SessionProvider } from './session/SessionProvider'
 
@@ -15,12 +16,14 @@ const queryClient = createQueryClient()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <SessionProvider>
-          <App />
-        </SessionProvider>
-      </BrowserRouter>
-    </QueryClientProvider>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <SessionProvider>
+            <App />
+          </SessionProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )

@@ -69,6 +69,21 @@ describe('rotas protegidas', () => {
     expect(screen.getByTestId('location')).toHaveTextContent(/^\/livro$/)
   })
 
+  it.each([
+    '%2F.%2F%2Fevil.example%2Fphish',
+    '%2Fa%2F..%2F%2Fevil.example',
+    '%2F%252e%2F%2Fevil.example',
+  ])(
+    'next que normaliza para //host (%s) também vai para o livro, sem tela em branco',
+    async (next) => {
+      mockApi({ 'GET /api/auth/me': () => json(200, makeMe()) })
+      renderApp(routes, { route: `/entrar?next=${next}` })
+
+      expect(await screen.findByRole('heading', { name: 'Livro' })).toBeInTheDocument()
+      expect(screen.getByTestId('location')).toHaveTextContent(/^\/livro$/)
+    },
+  )
+
   it('login errado mostra a mensagem do backend', async () => {
     mockApi({
       'GET /api/auth/me': () => apiError(401, 'unauthorized', 'Entre na sua conta.'),
