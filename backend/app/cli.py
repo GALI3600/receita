@@ -2,6 +2,7 @@
 
 uv run python -m app.cli import <url> [--skip-llm] [--json]
 uv run python -m app.cli seed-demo --email <email>   # só em ENVIRONMENT=development
+uv run python -m app.cli llm-spend [--days 7]        # gasto diário com o Claude x orçamento
 """
 
 import argparse
@@ -9,13 +10,16 @@ import asyncio
 import json
 import logging
 import sys
+from decimal import Decimal
 from typing import Any
 
+from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.errors import PipelineError
 from app.models import ImportStatus, Video
 from app.services.demo import DEMO_VIDEOS, DemoSeedError, seed_demo
 from app.services.pipeline import process_video
+from app.services.quotas import llm_spend_by_day
 from app.services.recipe_llm import format_timestamp
 from app.services.transcription import word_count
 
@@ -105,6 +109,27 @@ async def _seed_demo(email: str) -> int:
     return 0
 
 
+async def _llm_spend(days: int) -> int:
+    try:
+        async with SessionLocal() as session:
+            report = await llm_spend_by_day(session, days)
+    finally:
+        await engine.dispose()
+
+    budget = get_settings().daily_llm_budget_usd
+    print(f"orçamento diário (DAILY_LLM_BUDGET_USD): US$ {budget:.2f}")
+    print("dia (UTC)    chamadas  falhas   gasto (US$)   % do orçamento")
+    for spend in report:
+        share = f"{spend.cost_usd / Decimal(str(budget)):>7.0%}" if budget else "      -"
+        print(
+            f"{spend.day.isoformat()}  {spend.calls:>8}  {spend.failed_calls:>6}  "
+            f"{spend.cost_usd:>12.4f}   {share}"
+        )
+    total = sum((spend.cost_usd for spend in report), Decimal(0))
+    print(f"total em {days} dia(s): US$ {total:.4f}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description="Ferramentas do Receita")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -118,7 +143,13 @@ def main(argv: list[str] | None = None) -> int:
         help="põe receitas de demonstração no livro de um usuário (só em development)",
     )
     seed.add_argument("--email", required=True, help="e-mail de uma conta já cadastrada")
+    spend = sub.add_parser("llm-spend", help="gasto diário com o Claude (UTC) e o orçamento")
+    spend.add_argument("--days", type=int, default=7, help="quantos dias mostrar (padrão 7)")
     args = parser.parse_args(argv)
+
+    if args.command == "llm-spend":
+        logging.basicConfig(level=logging.WARNING)
+        return asyncio.run(_llm_spend(max(1, args.days)))
 
     if args.command == "seed-demo":
         logging.basicConfig(level=logging.WARNING)

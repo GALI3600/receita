@@ -277,3 +277,55 @@ def test_fetch_url_limits_subtitle_size(
             youtube._fetch_url("https://x/legenda", max_bytes=100)
     # Nunca lê a resposta inteira para a memória.
     assert _FakeYDL.response.requested == 101
+
+
+class _CookieYDL:
+    """Como o yt-dlp: lê o `cookiefile` ao abrir e o regrava ao fechar."""
+
+    seen: list[tuple[str, str]] = []
+
+    def __init__(self, opts: dict[str, Any]) -> None:
+        self.cookiefile = opts.get("cookiefile")
+
+    def __enter__(self) -> "_CookieYDL":
+        if self.cookiefile:
+            _CookieYDL.seen.append((self.cookiefile, Path(self.cookiefile).read_text()))
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.cookiefile:
+            Path(self.cookiefile).write_text("regravado pelo yt-dlp")
+
+    def urlopen(self, request: object) -> _FakeResponse:
+        return _FakeResponse(b"ok")
+
+
+def test_cookies_file_is_used_through_a_private_copy(
+    monkeypatch: pytest.MonkeyPatch, settings: Any, tmp_path: Path
+) -> None:
+    original = tmp_path / "cookies.txt"
+    original.write_text("# Netscape HTTP Cookie File\n")
+    original.chmod(0o444)
+    monkeypatch.setattr(settings, "ytdlp_cookies_file", str(original))
+    monkeypatch.setattr(youtube.yt_dlp, "YoutubeDL", _CookieYDL)
+    _CookieYDL.seen = []
+
+    youtube._fetch_url("https://x/legenda")
+    youtube._fetch_url("https://x/legenda")
+
+    [(first, content), (second, _)] = _CookieYDL.seen
+    assert content == "# Netscape HTTP Cookie File\n"
+    assert first != second
+    assert first != str(original)
+    assert not Path(first).exists()
+    assert original.read_text() == "# Netscape HTTP Cookie File\n"
+
+
+def test_no_cookies_by_default(monkeypatch: pytest.MonkeyPatch, settings: Any) -> None:
+    monkeypatch.setattr(settings, "ytdlp_cookies_file", "")
+    monkeypatch.setattr(youtube.yt_dlp, "YoutubeDL", _CookieYDL)
+    _CookieYDL.seen = []
+
+    youtube._fetch_url("https://x/legenda")
+
+    assert _CookieYDL.seen == []

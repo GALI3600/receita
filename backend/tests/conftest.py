@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-from arq.connections import ArqRedis, RedisSettings, create_pool
+from arq.connections import ArqRedis, RedisSettings
 from httpx import ASGITransport, AsyncClient
 from redis.exceptions import RedisError
 from sqlalchemy import text
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 import app.models  # noqa: F401
+from app import queue
 from app.api.deps import get_redis
 from app.config import Settings, get_settings
 from app.db import Base, get_session
@@ -92,7 +93,7 @@ async def redis() -> AsyncIterator[ArqRedis]:
     settings = RedisSettings.from_dsn(TEST_REDIS_URL)
     settings.conn_retries = 0
     try:
-        pool = await create_pool(settings)
+        pool = await queue.create_redis_pool(settings)
         await pool.flushdb()
     except (OSError, RedisError) as exc:
         pytest.skip(f"redis de teste indisponível ({TEST_REDIS_URL}): {exc}")

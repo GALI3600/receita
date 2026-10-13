@@ -36,6 +36,7 @@ class ErrorCode(StrEnum):
     INVALID_TOKEN = "invalid_token"
     CAPTCHA_FAILED = "captcha_failed"
     CAPTCHA_UNAVAILABLE = "captcha_unavailable"
+    SERVICE_UNAVAILABLE = "service_unavailable"
 
 
 class AppError(Exception):
@@ -323,3 +324,9 @@ class CaptchaUnavailableError(AppError):
     code = ErrorCode.CAPTCHA_UNAVAILABLE
     status_code = 503
     default_message = "Não conseguimos checar o captcha agora. Tente de novo em alguns minutos."
+
+
+class ServiceUnavailableError(AppError):
+    code = ErrorCode.SERVICE_UNAVAILABLE
+    status_code = 503
+    default_message = "O serviço está indisponível no momento. Tente de novo em alguns minutos."

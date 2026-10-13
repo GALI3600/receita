@@ -11,3 +11,8 @@ dist/
 frontend/test-results/
 frontend/playwright-report/
 frontend/e2e/screenshots/
+
+# Configuração de produção (segredos)
+.env.*
+!.env.example
+!.env.*.example

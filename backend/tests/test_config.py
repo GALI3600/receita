@@ -76,3 +76,46 @@ def test_every_setting_is_documented_in_env_example() -> None:
     documented = set(re.findall(r"^([A-Z0-9_]+)=", env_example.read_text(), re.M))
 
     assert {name.upper() for name in Settings.model_fields} - documented == set()
+
+
+# Definidas pelo docker-compose.prod.yml (não pelo .env.production).
+SET_BY_PROD_COMPOSE = {
+    "ENVIRONMENT",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "TRUST_PROXY_HEADERS",
+    "LOG_FORMAT",
+    "ACCESS_LOG",
+}
+
+
+def test_every_setting_is_in_the_production_env_example() -> None:
+    root = Path(__file__).parents[2]
+    env_example = (root / ".env.production.example").read_text()
+    documented = set(re.findall(r"^([A-Z0-9_]+)=", env_example, re.M))
+    compose = (root / "docker-compose.prod.yml").read_text()
+    settings = {name.upper() for name in Settings.model_fields}
+
+    assert settings - SET_BY_PROD_COMPOSE - documented == set()
+    for name in SET_BY_PROD_COMPOSE:
+        assert re.search(rf"^\s+{name}:", compose, re.M), name
+
+
+def test_production_env_example_is_a_valid_production_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).parents[2]
+    for line in (root / ".env.production.example").read_text().splitlines():
+        if line and not line.startswith("#"):
+            name, _, value = line.partition("=")
+            monkeypatch.setenv(name, value)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    with pytest.raises(ValidationError, match="SECRET_KEY"):
+        Settings(_env_file=None)
+    monkeypatch.setenv("SECRET_KEY", KEY)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.cookie_secure
+    assert settings.email_backend == "smtp"
+    assert settings.cors_origins == ["https://receita.example.com"]

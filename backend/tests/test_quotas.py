@@ -302,3 +302,37 @@ async def test_copies_keep_working_without_budget(
 
     assert response.status_code == 200
     assert response.json()["status"] == "done"
+
+
+async def test_spend_by_day(session: AsyncSession) -> None:
+    video = await make_video(session)
+    now = datetime(2026, 5, 10, 15, tzinfo=UTC)
+    usage = {"input_tokens": 1_000_000, "output_tokens": 0}
+
+    def call(created_at: datetime, error_code: str | None = None) -> LLMCall:
+        return LLMCall(
+            video_id=video.id,
+            model="claude-opus-5-5",
+            prompt_version="v",
+            usage=usage,
+            error_code=error_code,
+            created_at=created_at,
+        )
+
+    session.add_all(
+        [
+            call(now - timedelta(hours=1)),
+            call(now - timedelta(hours=2), "llm_refused"),
+            call(now - timedelta(days=2)),
+            call(now - timedelta(days=5)),  # fora da janela de 3 dias
+        ]
+    )
+    await session.commit()
+
+    report = await quotas.llm_spend_by_day(session, 3, now=now)
+
+    assert [(s.day.isoformat(), s.calls, s.failed_calls, s.cost_usd) for s in report] == [
+        ("2026-05-10", 2, 1, Decimal(8)),
+        ("2026-05-09", 0, 0, Decimal(0)),
+        ("2026-05-08", 1, 0, Decimal(4)),
+    ]

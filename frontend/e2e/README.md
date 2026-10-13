@@ -28,3 +28,17 @@ docker run --rm --network host --ipc=host \
   modo escuro) em `e2e/screenshots/`.
 
 Para rodar um arquivo só, passe o caminho no fim: `npx playwright test e2e/a11y.spec.ts`.
+
+## Fumaça do stack de produção (`e2e/prod`)
+
+`e2e/prod/smoke.spec.ts` roda com a própria configuração (`playwright.prod.config.ts`, fora da
+suíte padrão) contra o stack de produção local (`https://localhost:8443`, certificado da CA
+interna do Caddy, e-mails no Mailpit em `http://localhost:8025`): headers de segurança e CSP,
+healthchecks, fallback da SPA e cache dos assets, cadastro com o link lido do Mailpit, cookie
+`Secure`, o player do YouTube carregando sem violações de CSP, um import real passando pelos
+workers de produção e capturas `e2e/screenshots/prod-*.png`. Como subir o stack:
+[`docs/DEPLOY.md`](../../docs/DEPLOY.md#11-testar-o-stack-de-produção-localmente).
+
+```bash
+docker run ... mcr.microsoft.com/playwright:v1.64.0-noble npx playwright test -c playwright.prod.config.ts
+```

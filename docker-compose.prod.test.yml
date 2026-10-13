@@ -1,0 +1,24 @@
+# Teste local do stack de produção: DOMAIN=localhost (certificado da CA interna do Caddy),
+# portas 8080/8443 e e-mails no Mailpit (http://localhost:8025). Não use na VPS.
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.test.yml \
+#     --env-file deploy/local-test.env up -d --build
+#
+# O project name (receita-prod-test, no env) separa containers e volumes do compose de dev.
+
+services:
+  mailpit:
+    image: axllent/mailpit:v1.29
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    depends_on:
+      mailpit:
+        condition: service_healthy

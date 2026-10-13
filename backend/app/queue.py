@@ -4,10 +4,18 @@ Duas filas: a padrão (metadados, legendas, Claude) e a do whisper, atendida por
 concorrência baixa para que transcrições pesadas não travem os imports que têm legenda.
 Os ids dos jobs são determinísticos: o arq não enfileira de novo um id que já está na fila ou
 rodando, o que evita jobs duplicados para o mesmo import ou para o mesmo vídeo.
+
+Os jobs vão para o Redis em JSON, não em pickle (o padrão do arq): quem conseguir escrever no
+Redis não consegue executar código nos workers, e um argumento que não é JSON (um `uuid.UUID`,
+um objeto do ORM) falha já no enfileiramento, com `arq.jobs.SerializationError`. API, workers e
+testes precisam usar o mesmo par `job_serializer`/`job_deserializer` (`create_redis_pool`).
 """
 
+import json
 import uuid
+from typing import Any
 
+from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 from arq.constants import default_queue_name, in_progress_key_prefix, job_key_prefix
 
@@ -22,6 +30,35 @@ TRANSCRIBE_WHISPER = "transcribe_whisper"
 
 def redis_settings() -> RedisSettings:
     return RedisSettings.from_dsn(get_settings().redis_url)
+
+
+def _json_default(value: object) -> Any:
+    # Só o resultado de um job que terminou com exceção (o arq grava a exceção como resultado)
+    # chega aqui sem ser JSON; argumentos de jobs, nunca: qualquer outro tipo é recusado.
+    if isinstance(value, BaseException):
+        return repr(value)
+    raise TypeError(f"{type(value).__name__} não é serializável em JSON")
+
+
+def job_serializer(data: dict[str, Any]) -> bytes:
+    return json.dumps(data, default=_json_default, ensure_ascii=False).encode()
+
+
+def job_deserializer(data: bytes) -> dict[str, Any]:
+    job = json.loads(data)
+    # JSON não tem tupla: os argumentos voltam como lista, mas o arq (JobDef.args) usa tupla.
+    if isinstance(job.get("a"), list):
+        job["a"] = tuple(job["a"])
+    return job
+
+
+async def create_redis_pool(settings: RedisSettings | None = None) -> ArqRedis:
+    """Conexão do arq com o serializador JSON (API, CLI e testes)."""
+    return await create_pool(
+        settings or redis_settings(),
+        job_serializer=job_serializer,
+        job_deserializer=job_deserializer,
+    )
 
 
 def import_job_id(import_id: uuid.UUID) -> str:

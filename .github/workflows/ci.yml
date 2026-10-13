@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   backend:
@@ -25,8 +26,19 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # Sem o Redis, os testes de fila, rate limit e sessão seriam pulados.
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       TEST_DATABASE_URL: postgresql+asyncpg://receita:receita@localhost:5432/receita_test
+      TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -52,3 +64,70 @@ jobs:
       - run: npm run format:check
       - run: npm test
       - run: npm run build
+
+  # Imagens de produção (sem push): o build tem de passar e o que a imagem promete, existir.
+  images:
+    runs-on: ubuntu-latest
+    env:
+      ENV_FILE: .env.production.example
+      # Os segredos do exemplo vêm vazios (o Compose recusa); só para o build.
+      POSTGRES_PASSWORD: ci
+      REDIS_PASSWORD: ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configuração do Compose de produção
+        run: docker compose -f docker-compose.prod.yml --env-file .env.production.example config --quiet
+      - name: Build das imagens de produção
+        run: docker compose -f docker-compose.prod.yml --env-file .env.production.example build
+      - name: Backend roda sem root, com deno, ffmpeg e o app importável
+        run: |
+          docker run --rm -e ENVIRONMENT=development receita-backend:latest sh -ec '
+            test "$(id -u)" != 0
+            deno --version
+            ffmpeg -version > /dev/null
+            python -c "import app.main, app.worker, yt_dlp_ejs"
+          '
+      - name: Caddyfile válido e frontend no /srv
+        run: |
+          docker run --rm -e DOMAIN=receita.example.com -e ACME_EMAIL=ci@example.com \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" receita-web:latest sh -ec '
+              caddy validate --config /etc/caddy/Caddyfile
+              test -f /srv/index.html
+            '
+
+  # Fumaça do stack de produção (Caddy + HTTPS interno + Mailpit), como em docs/DEPLOY.md.
+  # Opcional: roda à mão (workflow_dispatch) e em push na main; os IPs do GitHub costumam ser
+  # barrados pelo YouTube (yt-dlp), então uma falha aqui não bloqueia o resto.
+  e2e-prod:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    needs: [images]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sobe o stack de produção local
+        run: >-
+          docker compose -f docker-compose.prod.yml -f docker-compose.prod.test.yml
+          --env-file deploy/local-test.env up -d --build --wait
+      - name: Playwright (e2e/prod)
+        working-directory: frontend
+        run: |
+          docker run --rm --network host --ipc=host \
+            -u "$(id -u):$(id -g)" --group-add "$(getent group docker | cut -d: -f3)" \
+            -e HOME=/tmp -e npm_config_cache=/tmp/.npm \
+            -v /var/run/docker.sock:/var/run/docker.sock -v "$(command -v docker):/usr/bin/docker:ro" \
+            -v "$PWD:/w" -w /w mcr.microsoft.com/playwright:v1.64.0-noble \
+            sh -c "npm ci && npx playwright test -c playwright.prod.config.ts"
+      - name: Logs do stack
+        if: failure()
+        run: >-
+          docker compose -f docker-compose.prod.yml -f docker-compose.prod.test.yml
+          --env-file deploy/local-test.env logs --no-color --tail 200
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-prod
+          path: |
+            frontend/test-results/prod
+            frontend/e2e/screenshots/prod-*.png
+          if-no-files-found: ignore

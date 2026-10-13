@@ -1,0 +1,241 @@
+# Stack de produção (VPS). Passo a passo em docs/DEPLOY.md.
+#
+#   cp .env.production.example .env.production   # e preencha
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Só o Caddy publica portas (80/443): ele faz o HTTPS, serve o frontend e repassa /api à API.
+# Banco, Redis, API e workers ficam na rede interna do Compose.
+
+name: receita-prod
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-hardening: &hardening
+  restart: unless-stopped
+  logging: *logging
+  security_opt:
+    - no-new-privileges:true
+
+x-backend: &backend
+  <<: *hardening
+  build:
+    context: ./backend
+    target: prod
+  image: receita-backend:${IMAGE_TAG:-latest}
+  # O yt-dlp chama o ffmpeg e o deno: o init reaproveita os processos-filho que terminam.
+  init: true
+  cap_drop: [ALL]
+  env_file:
+    - path: ${ENV_FILE:-.env.production}
+  environment:
+    ENVIRONMENT: production
+    DATABASE_URL: postgresql+asyncpg://receita:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}@db:5432/receita
+    REDIS_URL: redis://:${REDIS_PASSWORD:?defina REDIS_PASSWORD}@redis:6379/0
+    # A API só recebe conexões do Caddy, que sobrescreve o X-Forwarded-For com o IP do cliente.
+    TRUST_PROXY_HEADERS: "true"
+    LOG_FORMAT: json
+    ACCESS_LOG: "true"
+  volumes:
+    # Opcional: cookies do YouTube para o yt-dlp (YTDLP_COOKIES_FILE=/run/receita/<arquivo>).
+    - ./deploy/secrets:/run/receita:ro
+
+x-after-migrate: &after-migrate
+  db:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+  migrate:
+    condition: service_completed_successfully
+
+services:
+  caddy:
+    <<: *hardening
+    build:
+      context: ./frontend
+      target: prod
+      args:
+        # Embutida no JS no build: mudou, rode de novo com --build.
+        VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
+    image: receita-web:${IMAGE_TAG:-latest}
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp" # HTTP/3
+    environment:
+      DOMAIN: ${DOMAIN:?defina DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?defina ACME_EMAIL}
+      HSTS_MAX_AGE: ${HSTS_MAX_AGE:-31536000}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      default:
+        # IP fixo: a API só aceita X-Forwarded-* (--forwarded-allow-ips) vindos dele.
+        ipv4_address: ${CADDY_IP:-172.31.250.10}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  api:
+    <<: *backend
+    command: >-
+      uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --workers ${API_WORKERS:-2}
+      --proxy-headers --forwarded-allow-ips ${CADDY_IP:-172.31.250.10}
+      --no-access-log
+    depends_on: *after-migrate
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # Aplica as migrações e sai; API e workers só sobem depois que ele termina com sucesso.
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: alembic upgrade head
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Fila padrão: metadados, legendas e Claude; varredura de imports parados e retomada dos adiados.
+  worker:
+    <<: *backend
+    command: arq app.worker.WorkerSettings --custom-log-dict app.worker.LOG_CONFIG
+    stop_grace_period: 30s
+    depends_on: *after-migrate
+    healthcheck:
+      # O worker grava uma chave de saúde no Redis a cada 60 s; --check falha sem ela.
+      test: ["CMD", "arq", "app.worker.WorkerSettings", "--check"]
+      interval: 60s
+      timeout: 15s
+      start_period: 60s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # Fila do whisper (WHISPER_MAX_JOBS por vez). O modelo é baixado uma vez para o volume hf-cache.
+  # O "small" em int8 usa ~1–2 GB de RAM por transcrição; com WHISPER_MAX_JOBS=2 ou o "medium",
+  # aumente o limite abaixo.
+  worker-whisper:
+    <<: *backend
+    command: arq app.worker.WhisperWorkerSettings --custom-log-dict app.worker.LOG_CONFIG
+    stop_grace_period: 30s
+    volumes:
+      - ./deploy/secrets:/run/receita:ro
+      - hf-cache:/home/app/.cache/huggingface
+    depends_on: *after-migrate
+    healthcheck:
+      test: ["CMD", "arq", "app.worker.WhisperWorkerSettings", "--check"]
+      interval: 60s
+      timeout: 15s
+      # O primeiro start baixa o modelo (~500 MB no small) antes de atender a fila.
+      start_period: 10m
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+        # GPU NVIDIA (opcional): precisa do NVIDIA Container Toolkit no host, das bibliotecas
+        # CUDA 12/cuDNN 9 na imagem e de WHISPER_DEVICE=cuda + WHISPER_COMPUTE_TYPE=float16 no
+        # .env.production. Veja docs/DEPLOY.md, "GPU".
+        # reservations:
+        #   devices:
+        #     - driver: nvidia
+        #       count: 1
+        #       capabilities: [gpu]
+
+  db:
+    <<: *hardening
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: receita
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}
+      POSTGRES_DB: receita
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    shm_size: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U receita -d receita"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # Fila do arq, rate limit e sessões revogadas: com senha e persistência (AOF).
+  redis:
+    <<: *hardening
+    image: redis:8-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?defina REDIS_PASSWORD}
+      # Usada pelo redis-cli do healthcheck.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?defina REDIS_PASSWORD}
+    # A senha vai pela variável de ambiente; o redis troca o título do processo, então ela não
+    # aparece no ps. O entrypoint da imagem continua rodando o servidor como o usuário redis.
+    command:
+      - sh
+      - -c
+      - >-
+        exec docker-entrypoint.sh redis-server --requirepass "$$REDIS_PASSWORD"
+        --appendonly yes --maxmemory 192mb --maxmemory-policy noeviction
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${PROXY_SUBNET:-172.31.250.0/24}
+
+volumes:
+  pgdata:
+  redisdata:
+  hf-cache:
+  caddy-data:
+  caddy-config:

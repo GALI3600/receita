@@ -4,6 +4,8 @@ import { defineConfig, devices } from '@playwright/test'
 // Veja e2e/README.md para rodar com a imagem oficial do Playwright.
 export default defineConfig({
   testDir: './e2e',
+  // e2e/prod: fumaça do stack de produção, com a própria configuração (playwright.prod.config.ts).
+  testIgnore: ['prod/**'],
   outputDir: './test-results',
   globalSetup: './e2e/support/global-setup.ts',
   fullyParallel: false,

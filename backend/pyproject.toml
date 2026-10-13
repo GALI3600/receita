@@ -18,7 +18,7 @@ dependencies = [
     "pyjwt>=2.15.1",
     "sqlalchemy[asyncio]>=2.1.4",
     "uvicorn[standard]>=0.54.0",
-    "yt-dlp>=2026.8.19",
+    "yt-dlp[default,deno]>=2026.8.19",  # ejs + deno: desafios JS do YouTube
 ]
 
 [dependency-groups]

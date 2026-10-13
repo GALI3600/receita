@@ -239,15 +239,31 @@ Cada receita nova custa dinheiro (Claude) e CPU (whisper). Com cadastro aberto, 
 
 ## 10. Fases
 
-| Fase | Entrega |
-|---|---|
-| **0 — Fundação** | Monorepo, Docker Compose (Postgres, Redis), FastAPI "hello", Vite "hello", lint/format (ruff, eslint/prettier), CI básico |
-| **1 — Pipeline no backend** | `youtube.py` + `transcription.py` + `recipe_llm.py` funcionando via script/CLI com um link real; salva no banco |
-| **2 — API + worker** | Rotas de import com fila arq (fila separada para whisper), status por etapa, reaproveitamento por vídeo, tratamento de erros |
-| **3 — Auth e limites** | Cadastro, verificação de e-mail, login, reset de senha, cotas, rate limit, orçamento global |
-| **4 — Frontend MVP** | Landing, cadastro/login, colar link + progresso, livro, página da receita com player e timestamps |
-| **5 — Polimento** | Edição de receita, busca/tags/favoritos, impressão, responsividade, visual de livro |
-| **6 — Deploy** | VPS com Docker Compose (o whisper precisa de CPU/RAM dedicadas), HTTPS, backups do Postgres, monitoramento de custo |
+| Fase | Entrega | Situação |
+|---|---|---|
+| **0 — Fundação** | Monorepo, Docker Compose (Postgres, Redis), FastAPI "hello", Vite "hello", lint/format (ruff, eslint/prettier), CI básico | concluída |
+| **1 — Pipeline no backend** | `youtube.py` + `transcription.py` + `recipe_llm.py` funcionando via script/CLI com um link real; salva no banco | concluída |
+| **2 — API + worker** | Rotas de import com fila arq (fila separada para whisper), status por etapa, reaproveitamento por vídeo, tratamento de erros | concluída |
+| **3 — Auth e limites** | Cadastro, verificação de e-mail, login, reset de senha, cotas, rate limit, orçamento global | concluída |
+| **4 — Frontend MVP** | Landing, cadastro/login, colar link + progresso, livro, página da receita com player e timestamps | concluída |
+| **5 — Polimento** | Edição de receita, busca/tags/favoritos, impressão, responsividade, visual de livro | concluída |
+| **6 — Deploy** | VPS com Docker Compose (o whisper precisa de CPU/RAM dedicadas), HTTPS, backups do Postgres, monitoramento de custo | concluída (pronta para o deploy real; veja as pendências) |
+
+**Situação (out/2026):** fases 0 a 6 concluídas. O deploy está pronto para uma VPS
+(`docker-compose.prod.yml`, guia em [`DEPLOY.md`](DEPLOY.md)) e foi verificado localmente com o
+stack de produção completo (Caddy com certificado interno, Mailpit no lugar do SMTP).
+
+**Pendências**
+- **Testar com uma `ANTHROPIC_API_KEY` real** e iterar o prompt (`PROMPT_VERSION`) com 10–15
+  vídeos variados (com e sem legenda, pt e en, curtos e longos), medindo qualidade e custo real
+  por receita (`python -m app.cli llm-spend`). Até agora a geração só foi exercitada com o
+  Claude simulado nos testes e com o seed de demonstração.
+- Fazer o deploy de verdade: VPS, DNS, SMTP com domínio verificado, chaves do Turnstile e um
+  monitor externo em `/api/health/ready`; medir o whisper `small` na CPU da VPS escolhida.
+- Cópia dos backups para fora da VPS (rclone/S3, sugerido no guia) e um teste de restauração
+  periódico.
+- Opcional: GPU para o whisper (bloco comentado no compose), SSE no lugar do polling, ordenação
+  no livro.
 
 Primeiro marco útil: **fim da Fase 1**, quando um link vira uma receita JSON boa. Vale iterar o prompt com 10–15 vídeos variados (com e sem legenda, pt e en, curtos e longos) antes de investir na UI.
 

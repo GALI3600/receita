@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     daily_llm_budget_usd: float = Field(default=10.0, ge=0)
 
     max_video_duration_min: int = 60
+    # Arquivo de cookies (formato Netscape) de uma conta do YouTube para o yt-dlp, quando o IP do
+    # servidor é barrado como robô. Vazio: sem cookies.
+    ytdlp_cookies_file: str = ""
 
     whisper_model: str = "small"
     whisper_device: Literal["cpu", "cuda", "auto"] = "cpu"
@@ -98,6 +101,12 @@ class Settings(BaseSettings):
     import_retry_delay_s: int = 30
     # Imports parados há mais tempo que isso são dados como falhos pelo worker.
     import_stale_after_min: int = 360
+
+    # "json" em produção: uma linha JSON por evento (ver app/logs.py).
+    log_format: Literal["text", "json"] = "text"
+    # Log de acesso próprio da API (método, caminho, status, duração, IP do cliente), no lugar
+    # do log do uvicorn; ligado em produção, que roda o uvicorn com --no-access-log.
+    access_log: bool = False
 
     @property
     def is_development(self) -> bool:

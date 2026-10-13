@@ -33,7 +33,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import queue
+from app import logs, queue
 from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.errors import (
@@ -51,11 +51,7 @@ logger = logging.getLogger(__name__)
 
 Ctx = dict[str, Any]
 
-LOG_CONFIG = default_log_config(verbose=False)
-LOG_CONFIG["formatters"]["arq.standard"]["format"] = (
-    "%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
-LOG_CONFIG["loggers"]["app"] = {"handlers": ["arq.standard"], "level": "INFO"}
+LOG_CONFIG = logs.worker_log_config(default_log_config(verbose=False))
 
 # Espera pelo lock do vídeo: o arq reagenda o job com intervalos crescentes até este teto.
 LOCK_WAIT_MAX_S = 15
@@ -64,6 +60,9 @@ LOCK_WAIT_MAX_S = 15
 PROCESS_IMPORT_MAX_TRIES = 1000
 RETRY_COUNTER_TTL_S = 24 * 3600
 STALE_CHECK_AFTER = timedelta(minutes=5)
+# O worker grava `<fila>:health-check` no Redis a cada intervalo; `arq ... --check` (o
+# healthcheck do container) só passa enquanto essa chave existe.
+HEALTH_CHECK_INTERVAL_S = 60
 
 _TRANSIENT_ERRORS = (
     ConnectionError,
@@ -413,6 +412,9 @@ class WorkerSettings:
     # As crons em UTC, como a cota e o orçamento (`quotas.day_start`); sem isso o arq usa o fuso
     # do sistema e a retomada dos adiados poderia rodar antes de o orçamento zerar.
     timezone = UTC
+    job_serializer = queue.job_serializer
+    job_deserializer = queue.job_deserializer
+    health_check_interval = HEALTH_CHECK_INTERVAL_S
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10
@@ -431,6 +433,9 @@ class WhisperWorkerSettings:
             max_tries=_settings.import_max_retries + 3,
         )
     ]
+    job_serializer = queue.job_serializer
+    job_deserializer = queue.job_deserializer
+    health_check_interval = HEALTH_CHECK_INTERVAL_S
     on_startup = whisper_startup
     on_shutdown = shutdown
     max_jobs = _settings.whisper_max_jobs

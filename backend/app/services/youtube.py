@@ -10,8 +10,8 @@ import re
 import shutil
 import tempfile
 import threading
-from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -58,6 +58,25 @@ _YDL_BASE_OPTS: dict[str, Any] = {
     "skip_download": True,
     "socket_timeout": 30,
 }
+
+
+@contextmanager
+def _youtube_dl(extra: dict[str, Any] | None = None) -> Iterator[yt_dlp.YoutubeDL]:
+    """`YoutubeDL` com as opções base e, com `YTDLP_COOKIES_FILE`, os cookies de uma conta.
+
+    O yt-dlp regrava o arquivo de cookies ao fechar: cada uso recebe uma cópia temporária,
+    apagada no fim, para o original poder ficar montado só para leitura e jobs simultâneos não
+    escreverem no mesmo arquivo.
+    """
+    opts = {**_YDL_BASE_OPTS, **(extra or {})}
+    cookies_file = get_settings().ytdlp_cookies_file
+    with ExitStack() as stack:
+        if cookies_file:
+            directory = stack.enter_context(tempfile.TemporaryDirectory(prefix="receita-ck-"))
+            copy = Path(directory) / "cookies.txt"
+            shutil.copyfile(cookies_file, copy)
+            opts["cookiefile"] = str(copy)
+        yield stack.enter_context(yt_dlp.YoutubeDL(opts))
 
 
 def extract_youtube_id(url: str) -> str:
@@ -195,7 +214,7 @@ def _raise_for_download_error(exc: DownloadError) -> NoReturn:
 
 
 def _extract_info(youtube_id: str) -> dict[str, Any]:
-    with yt_dlp.YoutubeDL(_YDL_BASE_OPTS) as ydl:
+    with _youtube_dl() as ydl:
         try:
             info = ydl.extract_info(watch_url(youtube_id), download=False)
         except DownloadError as exc:
@@ -387,7 +406,7 @@ MAX_SUBTITLE_BYTES = 8 * 1024 * 1024
 
 
 def _fetch_url(url: str, max_bytes: int = MAX_SUBTITLE_BYTES) -> bytes:
-    with yt_dlp.YoutubeDL(_YDL_BASE_OPTS) as ydl, ydl.urlopen(Request(url)) as response:
+    with _youtube_dl() as ydl, ydl.urlopen(Request(url)) as response:
         data = response.read(max_bytes + 1)
     if len(data) > max_bytes:
         raise ValueError(f"legenda maior que {max_bytes} bytes")
@@ -412,7 +431,6 @@ def _download_audio(youtube_id: str, directory: Path, cancel: threading.Event) -
             raise DownloadCancelled("tarefa cancelada")
 
     opts = {
-        **_YDL_BASE_OPTS,
         "skip_download": False,
         # Áudio leve basta para fala; sem pós-processamento, o faster-whisper decodifica via PyAV.
         "format": "bestaudio[abr<=96]/worstaudio/bestaudio",
@@ -420,7 +438,7 @@ def _download_audio(youtube_id: str, directory: Path, cancel: threading.Event) -
         "max_filesize": 300 * 1024 * 1024,
         "progress_hooks": [abort_if_cancelled],
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with _youtube_dl(opts) as ydl:
         try:
             info = ydl.extract_info(watch_url(youtube_id), download=True)
         except DownloadError as exc:

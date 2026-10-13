@@ -1,5 +1,7 @@
 x-backend: &backend
-  build: ./backend
+  build:
+    context: ./backend
+    target: dev
   env_file:
     - path: ./backend/.env
       required: false
@@ -83,7 +85,9 @@ services:
     depends_on: *after-migrate
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      target: dev
     environment:
       API_URL: http://api:8000
       # O bind mount de /mnt/c (WSL2) não propaga eventos do inotify: o Vite observa por polling.

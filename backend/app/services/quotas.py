@@ -11,8 +11,8 @@ a partir do `usage`.
 
 import logging
 import uuid
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -202,6 +202,39 @@ async def llm_spend_today(session: AsyncSession, now: datetime | None = None) ->
         select(LLMCall.model, LLMCall.usage).where(LLMCall.created_at >= day_start(now))
     )
     return sum((llm_cost_usd(model, usage) for model, usage in rows), Decimal(0))
+
+
+@dataclass(frozen=True, slots=True)
+class DailySpend:
+    day: date
+    calls: int
+    failed_calls: int
+    cost_usd: Decimal
+
+
+async def llm_spend_by_day(
+    session: AsyncSession, days: int, now: datetime | None = None
+) -> list[DailySpend]:
+    """Gasto com o Claude nos últimos `days` dias UTC (hoje incluído), do mais recente ao mais
+    antigo; dias sem chamadas aparecem zerados. É o que `python -m app.cli llm-spend` mostra."""
+    today = day_start(now)
+    since = today - timedelta(days=days - 1)
+    rows = await session.execute(
+        select(LLMCall.created_at, LLMCall.model, LLMCall.usage, LLMCall.error_code).where(
+            LLMCall.created_at >= since
+        )
+    )
+    days_back = [(today - timedelta(days=offset)).date() for offset in range(days)]
+    by_day = {day: DailySpend(day, 0, 0, Decimal(0)) for day in days_back}
+    for created_at, model, usage, error_code in rows:
+        spend = by_day[created_at.astimezone(UTC).date()]
+        by_day[spend.day] = replace(
+            spend,
+            calls=spend.calls + 1,
+            failed_calls=spend.failed_calls + (error_code is not None),
+            cost_usd=spend.cost_usd + llm_cost_usd(model, usage),
+        )
+    return list(by_day.values())
 
 
 async def ensure_llm_budget(session: AsyncSession) -> None:

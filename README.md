@@ -2,12 +2,15 @@
 
 Cole o link de um vídeo de receita do YouTube e ganhe a receita escrita, salva no seu livro de receitas junto com o vídeo.
 
-Plano completo do projeto: [`docs/PLANO.md`](docs/PLANO.md).
+Plano completo do projeto: [`docs/PLANO.md`](docs/PLANO.md). Deploy em produção (VPS com Docker
+Compose, HTTPS, backups, monitoramento): [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Estrutura
 
 - `backend/` — API em FastAPI (Python 3.12, gerenciada com [uv](https://docs.astral.sh/uv/))
 - `frontend/` — site em React + TypeScript + Vite + Tailwind
+- `deploy/` — `Caddyfile` de produção e o env do teste local do stack de produção
+- `scripts/` — backup e restauração do Postgres de produção
 
 ## Rodando com Docker
 
@@ -20,6 +23,9 @@ docker compose up --build
 - API: http://localhost:8000 (docs em http://localhost:8000/docs)
 
 O serviço `migrate` roda `alembic upgrade head` e sai; a API e os workers só sobem depois dele.
+Os Dockerfiles têm dois alvos: `dev` (este compose: código montado, `--reload`, Vite) e `prod` (o
+padrão, usado pelo `docker-compose.prod.yml`: backend sem root e frontend como build estático
+servido pelo Caddy).
 Os imports são processados em segundo plano por dois workers [arq](https://arq-docs.helpmanual.io/):
 
 - `worker`: fila padrão (metadados, legendas, Claude), varredura de imports parados e retomada dos
@@ -58,6 +64,8 @@ npm run dev
 | POST | `/auth/forgot-password` `{email}` | Manda o link de redefinição se houver conta; sempre 200 |
 | POST | `/auth/reset-password` `{token, password}` | Troca a senha (link de uso único) e encerra todas as sessões (204) |
 | GET | `/auth/me` | Usuário + cota do dia (`quota.used`, `limit`, `remaining`, `resets_at`) |
+| GET | `/health` | O processo responde (`{"status": "ok"}`) |
+| GET | `/health/ready` | Banco e Redis acessíveis: 200 `{"status": "ok", "checks": {...}}` ou 503 com `checks` |
 | GET | `/account/export` | Todos os dados da conta em JSON (LGPD) |
 | DELETE | `/account` `{password}` | Apaga a conta, as receitas e os imports (204). Os vídeos compartilhados ficam |
 | POST | `/imports` `{url}` | Valida o link e enfileira (202). Se a receita já existe (no livro ou de outro usuário), conclui na hora (200). Exige e-mail confirmado |
@@ -90,7 +98,8 @@ também `details`.
 
 - **Rate limit por IP** (Redis, janela fixa) em cadastro, login, "esqueci a senha", reenvio do
   link e `POST /imports`: 429 `rate_limited` com `Retry-After`. Valores em `RATE_LIMIT_*`; o
-  `X-Forwarded-For` só vale com `TRUST_PROXY_HEADERS=true`. IPv6 conta pela rede /64; um IPv4
+  `X-Forwarded-For` (o último endereço) só vale com `TRUST_PROXY_HEADERS=true`; em produção o
+  Caddy sobrescreve esse header com o IP do cliente (veja `docs/DEPLOY.md`, "IP do cliente"). IPv6 conta pela rede /64; um IPv4
   escrito como IPv6 (`::ffff:a.b.c.d`, 6to4) conta como o próprio IPv4.
 - **E-mails de confirmação por endereço:** cadastro e reenvios somam no máximo
   `RATE_LIMIT_VERIFICATION_EMAIL_PER_ADDRESS` (padrão 5/dia) para o mesmo e-mail, venham de que IP
@@ -156,7 +165,7 @@ React + TypeScript + Vite, Tailwind, React Router e TanStack Query. Rotas: `/` (
   impressão continua clara). As animações respeitam `prefers-reduced-motion`.
 - Os links de confirmação e de redefinição de senha têm o token tirado da barra de endereço assim
   que a página abre, e o `index.html` define `Referrer-Policy: strict-origin-when-cross-origin`
-  (o proxy de produção deve mandar o mesmo header).
+  (o Caddy de produção manda o mesmo header, junto com CSP, HSTS e os demais).
 
 ### Receitas de demonstração
 
@@ -190,7 +199,8 @@ faster-whisper local (`WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE` 
 recusados.
 
 Cada chamada paga ao Claude, com sucesso ou não, é gravada em `llm_calls` (modelo, `usage`, código
-de erro): é a base do custo diário. Uma recusa, ou duas saídas inválidas, para o mesmo vídeo fazem
+de erro): é a base do custo diário. `uv run python -m app.cli llm-spend --days 14` mostra o gasto
+por dia UTC (chamadas, falhas, US$ e % de `DAILY_LLM_BUDGET_USD`). Uma recusa, ou duas saídas inválidas, para o mesmo vídeo fazem
 o pipeline parar de chamar o Claude para ele até `PROMPT_VERSION` mudar.
 
 ## Checagens
@@ -209,4 +219,32 @@ cd frontend && npm run lint && npm run format:check && npm test && npm run build
 ```
 
 Os testes de ponta a ponta (Playwright) rodam contra o Docker Compose de pé; veja
-[`frontend/e2e/README.md`](frontend/e2e/README.md).
+[`frontend/e2e/README.md`](frontend/e2e/README.md). A fumaça do stack de produção
+(`e2e/prod`, com `playwright.prod.config.ts`) roda contra o teste local descrito em
+[`docs/DEPLOY.md`](docs/DEPLOY.md#11-testar-o-stack-de-produção-localmente).
+
+## Produção
+
+Resumo (detalhes, requisitos da VPS, backups, monitoramento e troubleshooting em
+[`docs/DEPLOY.md`](docs/DEPLOY.md)):
+
+```bash
+cp .env.production.example .env.production   # domínio, segredos, SMTP, ANTHROPIC_API_KEY...
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build --wait
+```
+
+- **Caddy** na frente de tudo: HTTPS automático para `DOMAIN`, o build estático do frontend com
+  fallback de SPA e cache longo dos assets, `/api/*` → API sem o prefixo e os headers de
+  segurança (HSTS, CSP compatível com o player do YouTube e o Turnstile, `nosniff`,
+  `Referrer-Policy`, `Permissions-Policy`).
+- **API** no uvicorn com `API_WORKERS` processos e `--proxy-headers` aceito só do IP do Caddy;
+  **workers** arq com healthcheck (`arq ... --check`); Postgres e Redis (com senha) sem portas
+  publicadas; volumes nomeados, limites de memória e rotação de logs.
+- **Jobs em JSON:** a API, os workers e os testes usam `queue.job_serializer`/`job_deserializer`
+  (JSON, não pickle); um argumento que não é JSON falha no enfileiramento.
+- **Logs:** `LOG_FORMAT=json` (uma linha JSON por evento) e `ACCESS_LOG=true` (log de acesso da
+  API com o IP do cliente, sem query string).
+- **Backups:** `scripts/backup-db.sh` (pg_dump comprimido com rotação, para o cron) e
+  `scripts/restore-db.sh`.
+- **YouTube:** a imagem traz o deno (runtime JS do yt-dlp) e o `yt-dlp-ejs`; se o IP da VPS for
+  barrado, `YTDLP_COOKIES_FILE` aponta para cookies de uma conta.
