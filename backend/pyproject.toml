@@ -5,11 +5,15 @@ description = "API do Receita: transforma vídeos de receita do YouTube em recei
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
+    "anthropic>=1.13.0",
     "asyncpg>=0.32.0",
+    "av<19",  # faster-whisper 1.2.1 chama av.open(metadata_errors=...), removido no av 19
     "fastapi>=0.143.0",
+    "faster-whisper>=1.2.1",
     "pydantic-settings>=2.15.0",
     "sqlalchemy[asyncio]>=2.1.4",
     "uvicorn[standard]>=0.54.0",
+    "yt-dlp>=2026.8.19",
 ]
 
 [dependency-groups]

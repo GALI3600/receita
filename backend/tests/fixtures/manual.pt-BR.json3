@@ -1,0 +1,14 @@
+{
+  "wireMagic": "pb3",
+  "pens": [{}],
+  "wsWinStyles": [{}],
+  "wpWinPositions": [{}],
+  "events": [
+    {"tStartMs": 60, "dDurationMs": 2000, "segs": [{"utf8": "Hoje vamos fazer um bolo de cenoura."}]},
+    {"tStartMs": 2060, "dDurationMs": 3224, "segs": [{"utf8": "Bata no liquidificador\n3 cenouras e 4 ovos."}]},
+    {"tStartMs": 5284, "dDurationMs": 2778, "segs": [{"utf8": "<i>Junte</i> 2 xícaras de açúcar &amp; o óleo."}]},
+    {"tStartMs": 8062, "dDurationMs": 100, "segs": [{"utf8": "\n"}]},
+    {"tStartMs": 8200, "dDurationMs": 3000, "segs": [{"utf8": "Junte 2 xícaras de açúcar &amp; o óleo."}]},
+    {"tStartMs": 11397, "dDurationMs": 2334, "segs": [{"utf8": "Asse por "}, {"utf8": "40 minutos."}]}
+  ]
+}
