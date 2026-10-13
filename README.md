@@ -25,7 +25,7 @@ docker compose up --build
 O serviço `migrate` roda `alembic upgrade head` e sai; a API e os workers só sobem depois dele.
 Os Dockerfiles têm dois alvos: `dev` (este compose: código montado, `--reload`, Vite) e `prod` (o
 padrão, usado pelo `docker-compose.prod.yml`: backend sem root e frontend como build estático
-servido pelo Caddy).
+servido pelo Caddy, também sem root).
 Os imports são processados em segundo plano por dois workers [arq](https://arq-docs.helpmanual.io/):
 
 - `worker`: fila padrão (metadados, legendas, Claude), varredura de imports parados e retomada dos

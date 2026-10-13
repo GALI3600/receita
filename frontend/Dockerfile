@@ -31,4 +31,15 @@ RUN npm run build
 # --- prod: Caddy com o dist -------------------------------------------------------------------
 FROM caddy:2-alpine AS prod
 
+# Roda sem root (uid 10002). Os certificados e o estado ficam em /data e /config (volumes, do
+# usuário caddy); o site em /srv continua do root, só para leitura do processo. As portas 80/443
+# abrem pelo sysctl net.ipv4.ip_unprivileged_port_start do docker-compose.prod.yml, então o
+# binário perde a file capability (cap_net_bind_service): com cap_drop ALL, o exec de um binário
+# com capability que o container não tem falha com "operation not permitted". A cópia não leva
+# o xattr.
+RUN cp /usr/bin/caddy /tmp/caddy && mv -f /tmp/caddy /usr/bin/caddy \
+    && addgroup -S -g 10002 caddy \
+    && adduser -S -D -H -h /data -s /sbin/nologin -u 10002 -G caddy caddy \
+    && chown -R caddy:caddy /data /config
 COPY --from=build /app/dist /srv
+USER caddy

@@ -61,8 +61,16 @@ services:
         # Embutida no JS no build: mudou, rode de novo com --build.
         VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
     image: receita-web:${IMAGE_TAG:-latest}
+    # Sem root (uid 10002, da imagem) e com o sistema de arquivos só para leitura: um Caddy
+    # comprometido não reescreve o JS do site em /srv. O sysctl deixa um usuário comum abrir as
+    # portas 80/443 sem nenhuma capability (veja o estágio prod do frontend/Dockerfile).
+    user: "10002:10002"
+    read_only: true
+    tmpfs:
+      - /tmp
     cap_drop: [ALL]
-    cap_add: [NET_BIND_SERVICE]
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 80
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
@@ -77,11 +85,11 @@ services:
       - caddy-config:/config
     networks:
       default:
-        # IP fixo: a API só aceita X-Forwarded-* (--forwarded-allow-ips) vindos dele.
+        # IP fixo: a API só aceita X-Forwarded-* (--forwarded-allow-ips) vindos dele. O Caddy
+        # fala com a API só por IPv4 (tcp4/api:8000 no Caddyfile).
         ipv4_address: ${CADDY_IP:-172.31.250.10}
-    depends_on:
-      api:
-        condition: service_healthy
+    # Sem depends_on na API de propósito: numa atualização do backend o Compose recriaria o
+    # Caddy junto e o site inteiro sairia do ar; assim só /api responde 502 durante a troca.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:2019/config/ || exit 1"]
       interval: 30s
@@ -149,8 +157,8 @@ services:
           memory: 1G
 
   # Fila do whisper (WHISPER_MAX_JOBS por vez). O modelo é baixado uma vez para o volume hf-cache.
-  # O "small" em int8 usa ~1–2 GB de RAM por transcrição; com WHISPER_MAX_JOBS=2 ou o "medium",
-  # aumente o limite abaixo.
+  # O "small" em int8 usa ~1–1,5 GB de RAM por transcrição, qualquer que seja a duração (o áudio
+  # vai ao whisper em blocos de 10 min); com WHISPER_MAX_JOBS=2 ou o "medium", aumente o limite.
   worker-whisper:
     <<: *backend
     command: arq app.worker.WhisperWorkerSettings --custom-log-dict app.worker.LOG_CONFIG
@@ -229,9 +237,16 @@ services:
 
 networks:
   default:
+    # IPv6 na rede interna: com ela, o Docker publica as portas do Caddy em IPv6 por NAT
+    # (ip6tables) e o Caddy vê o IP real do visitante. Numa rede só IPv4, as conexões IPv6
+    # passariam pelo docker-proxy e chegariam todas com o IP do gateway da rede, dividindo um
+    # único balde de rate limit. Precisa do Docker 27+ (ip6tables ligado por padrão).
+    enable_ipv6: true
     ipam:
       config:
         - subnet: ${PROXY_SUBNET:-172.31.250.0/24}
+        # Faixa privada (ULA) só desta rede; mude se conflitar com outra rede da VPS.
+        - subnet: ${PROXY_SUBNET6:-fd52:7ec1:9a1e:250::/64}
 
 volumes:
   pgdata:

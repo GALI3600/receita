@@ -87,12 +87,15 @@ jobs:
             ffmpeg -version > /dev/null
             python -c "import app.main, app.worker, yt_dlp_ejs"
           '
-      - name: Caddyfile válido e frontend no /srv
+      - name: Caddy sem root (roda com cap_drop ALL), Caddyfile válido e /srv só leitura
         run: |
-          docker run --rm -e DOMAIN=receita.example.com -e ACME_EMAIL=ci@example.com \
+          docker run --rm --cap-drop ALL --security-opt no-new-privileges \
+            -e DOMAIN=receita.example.com -e ACME_EMAIL=ci@example.com \
             -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" receita-web:latest sh -ec '
+              test "$(id -u)" = 10002
               caddy validate --config /etc/caddy/Caddyfile
               test -f /srv/index.html
+              ! touch /srv/index.html 2>/dev/null
             '
 
   # Fumaça do stack de produção (Caddy + HTTPS interno + Mailpit), como em docs/DEPLOY.md.

@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 from yt_dlp.utils import DownloadError
 
@@ -250,20 +251,41 @@ class _WhisperInfo:
 
 
 class _FakeWhisperModel:
-    def __init__(self, segments: list[_WhisperSegment]) -> None:
+    def __init__(self, segments: list[_WhisperSegment], language: str = "pt") -> None:
         self.segments = segments
+        self.language = language
         self.kwargs: dict[str, Any] = {}
+        self.calls: list[tuple[int, str | None]] = []
         self.yielded = 0
 
-    def transcribe(self, audio: str, **kwargs: Any) -> tuple[Any, _WhisperInfo]:
+    def transcribe(self, audio: np.ndarray, **kwargs: Any) -> tuple[Any, _WhisperInfo]:
         self.kwargs = kwargs
+        self.calls.append((len(audio), kwargs["language"]))
+
+        call = len(self.calls)
 
         def generate() -> Any:
             for seg in self.segments:
                 self.yielded += 1
-                yield seg
+                # Texto diferente a cada bloco (o finalize funde repetições consecutivas).
+                yield replace(seg, text=seg.text.replace("{n}", str(call)))
 
-        return generate(), _WhisperInfo()
+        return generate(), _WhisperInfo(language=kwargs["language"] or self.language)
+
+
+SR = transcription.SAMPLE_RATE
+
+
+def _fake_audio(monkeypatch: pytest.MonkeyPatch, seconds: float) -> np.ndarray:
+    """Áudio com "fala" (ruído) em todo lugar; os silêncios são colocados pelo teste."""
+    audio = np.random.default_rng(0).uniform(-0.5, 0.5, int(seconds * SR)).astype(np.float32)
+    monkeypatch.setattr(transcription, "load_audio", lambda path: audio)
+    return audio
+
+
+@pytest.fixture(autouse=True)
+def _short_audio(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_audio(monkeypatch, 5)
 
 
 def test_whisper_transcribe_filters_hallucinations(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,7 +314,69 @@ def test_whisper_transcribe_stops_when_cancelled(monkeypatch: pytest.MonkeyPatch
     cancel.set()
 
     assert transcription.whisper_transcribe(Path("/tmp/a.m4a"), None, cancel) == []
+    assert model.yielded == 0
+
+
+def test_whisper_transcribe_stops_between_segments(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _FakeWhisperModel([_WhisperSegment(float(i), i + 1.0, "mexa") for i in range(100)])
+    monkeypatch.setattr(transcription, "get_whisper_model", lambda: model)
+    _fake_audio(monkeypatch, 25 * 60)
+    cancel = threading.Event()
+    original = model.transcribe
+
+    def transcribe_then_cancel(audio: np.ndarray, **kwargs: Any) -> tuple[Any, _WhisperInfo]:
+        segments, info = original(audio, **kwargs)
+
+        def generate() -> Any:
+            for seg in segments:
+                cancel.set()
+                yield seg
+
+        return generate(), info
+
+    monkeypatch.setattr(model, "transcribe", transcribe_then_cancel)
+
+    assert transcription.whisper_transcribe(Path("/tmp/a.m4a"), None, cancel) == []
     assert model.yielded == 1
+    assert len(model.calls) == 1
+
+
+def test_long_audio_is_transcribed_in_chunks_cut_at_silence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Um vídeo de 60 min não passa inteiro ao whisper (as features dele não cabiam na RAM)."""
+    audio = _fake_audio(monkeypatch, 25 * 60 + 30)
+    # Silêncio de 1 s 20 s antes de cada fronteira nominal (600 s): é ali que o corte acontece.
+    audio[580 * SR : 581 * SR] = 0
+    audio[1160 * SR : 1161 * SR] = 0
+    model = _FakeWhisperModel([_WhisperSegment(1.0, 2.0, " Pique a cebola {n}.")], language="es")
+    monkeypatch.setattr(transcription, "get_whisper_model", lambda: model)
+
+    segments = transcription.whisper_transcribe(Path("/tmp/a.m4a"), None)
+
+    lengths = [n for n, _ in model.calls]
+    assert len(lengths) == 3
+    assert max(lengths) <= transcription.WHISPER_CHUNK_S * SR
+    assert sum(lengths) == len(audio)
+    first_cut = lengths[0] / SR
+    second_cut = first_cut + lengths[1] / SR
+    assert 580 <= first_cut <= 581
+    assert 1160 <= second_cut <= 1161
+    # O idioma detectado no primeiro bloco vale para os seguintes.
+    assert [lang for _, lang in model.calls] == [None, "es", "es"]
+    # Os tempos de cada bloco são deslocados para o tempo do vídeo.
+    assert [s["text"] for s in segments] == [f"Pique a cebola {n}." for n in (1, 2, 3)]
+    assert [s["start"] for s in segments] == pytest.approx(
+        [1.0, first_cut + 1.0, second_cut + 1.0], abs=0.001
+    )
+
+
+def test_short_tail_joins_the_last_chunk() -> None:
+    audio = np.ones((transcription.WHISPER_CHUNK_S + 30) * SR, dtype=np.float32)
+
+    assert transcription.chunk_bounds(audio) == [(0, len(audio))]
+    assert transcription.chunk_bounds(audio[: 10 * SR]) == [(0, 10 * SR)]
+    assert transcription.chunk_bounds(audio[:0]) == []
 
 
 async def test_run_cancellable_waits_for_thread_to_stop() -> None:

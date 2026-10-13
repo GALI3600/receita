@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 
 import { expect, test, type Page } from '@playwright/test'
@@ -73,6 +73,36 @@ async function verificationLinkFromMailpit(page: Page, email: string): Promise<s
   throw new Error(`o e-mail de confirmação para ${email} não chegou ao Mailpit`)
 }
 
+/** stdout + stderr do container desde `since` (o Caddy e a API usam os dois). */
+function dockerLogs(service: string, since: string): string {
+  const result = spawnSync('docker', ['logs', '--since', since, container(service)], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  return `${result.stdout}\n${result.stderr}`
+}
+
+/**
+ * Visitante IPv6 "de fora": um netns ligado ao host por um veth (não por uma bridge do Docker)
+ * acessa a porta publicada pelo IPv6 do host. Roda num container privilegiado na rede do host e
+ * desfaz tudo no fim. Do próprio host (::1) a conexão passaria pelo docker-proxy de qualquer jeito.
+ */
+const IPV6_CLIENT = `
+set -e
+apk add -q --no-cache iproute2 curl >/dev/null
+ip netns add rcpv6
+trap 'ip link del rcpv6-host 2>/dev/null; ip netns del rcpv6 2>/dev/null' EXIT
+ip link add rcpv6-host type veth peer name rcpv6-peer
+ip link set rcpv6-peer netns rcpv6
+ip addr add fd99:6::1/64 dev rcpv6-host nodad
+ip link set rcpv6-host up
+ip -n rcpv6 addr add fd99:6::2/64 dev rcpv6-peer nodad
+ip -n rcpv6 link set rcpv6-peer up
+ip -n rcpv6 -6 route add default via fd99:6::1
+ip netns exec rcpv6 curl -sk -m 10 --resolve "localhost:$PORT:[fd99:6::1]" \
+  -o /dev/null -w '%{http_code}' "https://localhost:$PORT/api/auth/me?ipv6=$PROBE"
+`
+
 /** Violações de CSP da nossa página (as de dentro do iframe do YouTube não contam). */
 async function cspViolations(page: Page): Promise<string[]> {
   return page.evaluate(() => (window as unknown as { __csp?: string[] }).__csp ?? [])
@@ -115,6 +145,97 @@ test('headers de segurança, healthchecks e SPA servida pelo Caddy', async ({ re
   })
   expect((await request.get('/api/docs')).status()).toBe(404)
   expect((await request.get('/api/health')).headers()['cache-control']).toBe('no-store')
+})
+
+test('erros do Caddy (asset inexistente) com os headers de segurança e sem cache longo', async ({
+  request,
+}) => {
+  const missing = await request.get('/assets/nao-existe-123.js')
+  expect(missing.status()).toBe(404)
+  const headers = missing.headers()
+  expect(headers['content-security-policy']).toContain("frame-ancestors 'none'")
+  expect(headers['strict-transport-security']).toMatch(/^max-age=\d+/)
+  expect(headers['x-content-type-options']).toBe('nosniff')
+  expect(headers['x-frame-options']).toBe('DENY')
+  expect(headers['referrer-policy']).toBe('strict-origin-when-cross-origin')
+  expect(headers['permissions-policy']).toContain('camera=()')
+  expect(headers['server']).toBeUndefined()
+  expect(headers['cache-control']).toBe('no-store')
+})
+
+test('Caddy sem root e sem escrita no site (/srv)', () => {
+  const caddy = container('caddy')
+  expect(execFileSync('docker', ['exec', caddy, 'id', '-u'], { encoding: 'utf8' }).trim()).toBe(
+    '10002',
+  )
+  const write = spawnSync('docker', ['exec', caddy, 'touch', '/srv/index.html', '/srv/novo.js'], {
+    encoding: 'utf8',
+  })
+  expect(write.status).not.toBe(0)
+  expect(write.stderr).toMatch(/Read-only file system|Permission denied/)
+})
+
+test('o token do link de e-mail não vaza no log do Caddy pelo Referer dos assets', async ({
+  page,
+}) => {
+  const since = new Date(Date.now() - 1000).toISOString()
+  const token = `TOKENVAZADO${Date.now()}`
+  const assets: string[] = []
+  page.on('request', (req) => {
+    if (req.url().includes('/assets/') && req.headers()['referer']?.includes(token)) {
+      assets.push(req.url())
+    }
+  })
+  await page.goto(`/redefinir-senha?token=${token}`)
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+  // O navegador manda mesmo a URL com o token no Referer dos assets (mesma origem).
+  expect(assets.length).toBeGreaterThan(0)
+
+  await expect
+    .poll(() => dockerLogs('caddy', since).includes('"uri":"/assets/'), { timeout: 10_000 })
+    .toBe(true)
+  const logs = dockerLogs('caddy', since)
+  expect(logs).not.toContain(token)
+  expect(logs).toContain('/redefinir-senha?token=REDACTED')
+})
+
+test('visitante IPv6 chega à API com o próprio IP (não o gateway da rede Docker)', () => {
+  test.skip(process.env.E2E_SKIP_IPV6 === '1', 'E2E_SKIP_IPV6=1')
+  const since = new Date(Date.now() - 1000).toISOString()
+  const probe = `${Date.now()}`
+  const port = new URL(test.info().project.use.baseURL ?? 'https://localhost:8443').port || '443'
+  const status = execFileSync(
+    'docker',
+    [
+      'run',
+      '--rm',
+      '-i',
+      '--privileged',
+      '--network',
+      'host',
+      '-e',
+      `PORT=${port}`,
+      '-e',
+      `PROBE=${probe}`,
+      'alpine:3.23',
+      'sh',
+      '-s',
+    ],
+    { input: IPV6_CLIENT, encoding: 'utf8' },
+  )
+  // 401 (sem sessão): o /health não entra no log de acesso da API.
+  expect(status).toBe('401')
+
+  const caddyLine = dockerLogs('caddy', since)
+    .split('\n')
+    .find((line) => line.includes(`ipv6=${probe}`))
+  expect(caddyLine).toBeDefined()
+  expect(JSON.parse(caddyLine!).request.client_ip).toBe('fd99:6::2')
+  const apiLines = dockerLogs('api', since)
+    .split('\n')
+    .filter((line) => line.includes('"app.access"') && line.includes('"/auth/me"'))
+    .map((line) => JSON.parse(line) as { client_ip: string })
+  expect(apiLines.map((line) => line.client_ip)).toContain('fd99:6::2')
 })
 
 test('cadastro com e-mail real (Mailpit) → login → receita com o player do YouTube → import', async ({

@@ -3,7 +3,7 @@
 # - HTTPS automático para {$DOMAIN} (Let's Encrypt; com DOMAIN=localhost, a CA interna do Caddy);
 # - serve o build do frontend (/srv) com fallback de SPA e cache longo dos assets com hash;
 # - /api/* vai para a API sem o prefixo (/api/auth/me → /auth/me), como o proxy do Vite em dev;
-# - headers de segurança em todas as respostas.
+# - headers de segurança em todas as respostas, inclusive nas de erro (handle_errors).
 #
 # Depois de editar: docker compose -f docker-compose.prod.yml --env-file .env.production \
 #   exec caddy caddy reload --config /etc/caddy/Caddyfile
@@ -22,9 +22,9 @@
 	# }
 }
 
-{$DOMAIN} {
-	encode zstd gzip
-
+# Headers de segurança: aplicados às respostas normais e de novo em handle_errors, porque o
+# bloco de header com "-Server" é adiado (aplicado na escrita) e não chega às respostas de erro.
+(security_headers) {
 	header {
 		# HSTS_MAX_AGE=0 só no teste local (https://localhost), para o navegador não guardar HSTS.
 		Strict-Transport-Security "max-age={$HSTS_MAX_AGE:31536000}; includeSubDomains"
@@ -38,6 +38,11 @@
 		Content-Security-Policy "default-src 'self'; script-src 'self' https://www.youtube.com https://s.ytimg.com https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https://i.ytimg.com https://i9.ytimg.com; frame-src https://www.youtube-nocookie.com https://www.youtube.com https://challenges.cloudflare.com; connect-src 'self'; media-src 'self'; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; upgrade-insecure-requests"
 		-Server
 	}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	import security_headers
 
 	# API: sem o prefixo /api. O X-Forwarded-For é sobrescrito com o IP do cliente (o que se
 	# conectou ao Caddy, ou o do CF-Connecting-IP com o bloco do Cloudflare acima): qualquer
@@ -48,16 +53,20 @@
 			max_size 1MB
 		}
 		header ?Cache-Control "no-store"
-		reverse_proxy api:8000 {
+		# tcp4: a API só escuta em IPv4 e o --forwarded-allow-ips dela é o CADDY_IP (IPv4); a
+		# rede do Compose também tem IPv6, e o nome "api" resolveria para os dois.
+		reverse_proxy tcp4/api:8000 {
 			header_up X-Forwarded-For {client_ip}
 		}
 	}
 
 	# Assets do Vite têm hash no nome: cache de um ano. Arquivo que não existe dá 404 (sem
-	# fallback para o index.html, que seria guardado em cache como se fosse o JS).
+	# fallback para o index.html, que seria guardado em cache como se fosse o JS) e cai no
+	# handle_errors abaixo, sem o cache longo.
 	handle /assets/* {
 		root * /srv
-		header Cache-Control "public, max-age=31536000, immutable"
+		@exists file
+		header @exists Cache-Control "public, max-age=31536000, immutable"
 		file_server
 	}
 
@@ -69,8 +78,18 @@
 		file_server
 	}
 
+	# Erros do próprio Caddy (asset inexistente, API fora do ar → 502): mesmos headers de
+	# segurança, sem cache.
+	handle_errors {
+		import security_headers
+		header Cache-Control "no-store"
+		respond "{err.status_code} {err.status_text}"
+	}
+
 	# Log de acesso em JSON. Cookie e Authorization já saem ocultos; o token dos links de
-	# confirmação e de redefinição de senha (/verificar-email?token=...) também é apagado.
+	# confirmação e de redefinição de senha (/verificar-email?token=...) também é apagado, na
+	# URL e no Referer: a página do link carrega os assets antes de o React tirar o token da
+	# URL, e o navegador manda a URL inteira no Referer dos pedidos para a mesma origem.
 	log {
 		output stdout
 		format filter {
@@ -78,6 +97,7 @@
 			request>uri query {
 				replace token REDACTED
 			}
+			request>headers>Referer regexp "token=[^&#]*" "token=REDACTED"
 		}
 	}
 }
