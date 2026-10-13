@@ -86,6 +86,8 @@ services:
     build: ./frontend
     environment:
       API_URL: http://api:8000
+      # Chave pública do Cloudflare Turnstile; vazia, o cadastro não mostra captcha.
+      VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
     ports:
       - "5173:5173"
     volumes:

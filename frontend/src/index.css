@@ -1,1 +1,133 @@
 @import 'tailwindcss';
+
+/* Livro de receitas: papel creme, tinta marrom, acento terracota. Contraste AA conferido
+   (texto principal 12,7:1; secundário 6,5:1; terracota 5,4:1 no papel e 5,8:1 com texto branco). */
+@theme {
+  --font-serif: 'Fraunces Variable', 'Iowan Old Style', Georgia, serif;
+  --font-sans: 'Source Sans 3 Variable', 'Segoe UI', system-ui, sans-serif;
+
+  --color-paper: #faf6ee;
+  --color-paper-deep: #f1e8d8;
+  --color-card: #fffdf8;
+  --color-line: #e2d5bf;
+  --color-ink: #3b2a20;
+  --color-ink-soft: #6b5547;
+  --color-terracotta: #a8472a;
+  --color-terracotta-dark: #8f3b1d;
+  --color-terracotta-tint: #f6e3d6;
+  --color-sage: #2f6b4f;
+  --color-sage-tint: #e3efe6;
+  --color-danger: #9b2c2c;
+  --color-danger-tint: #f8e1de;
+  --color-mustard-tint: #f7ecc9;
+
+  --shadow-page: 0 1px 0 rgb(59 42 32 / 0.04), 0 12px 32px -18px rgb(59 42 32 / 0.35);
+  --shadow-cover: 0 1px 2px rgb(59 42 32 / 0.08), 0 10px 22px -14px rgb(59 42 32 / 0.45);
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-paper font-sans text-ink antialiased;
+    font-size: 1.0625rem;
+    line-height: 1.6;
+    /* Textura discreta de papel. */
+    background-image:
+      radial-gradient(circle at 20% 10%, rgb(255 255 255 / 0.6), transparent 40%),
+      radial-gradient(circle at 80% 90%, rgb(241 232 216 / 0.7), transparent 45%);
+  }
+
+  h1,
+  h2,
+  h3 {
+    @apply font-serif text-ink;
+    font-optical-sizing: auto;
+    text-wrap: balance;
+  }
+
+  :focus-visible {
+    outline: 3px solid var(--color-terracotta);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--color-terracotta-tint);
+  }
+}
+
+@layer components {
+  .btn,
+  .btn-primary,
+  .btn-secondary,
+  .btn-ghost,
+  .btn-danger {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-full px-5 py-2 text-base font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60;
+  }
+  .btn-primary {
+    @apply bg-terracotta text-white hover:bg-terracotta-dark;
+  }
+  .btn-secondary {
+    @apply border border-ink/25 bg-card text-ink hover:border-ink/50 hover:bg-paper-deep;
+  }
+  .btn-ghost {
+    @apply px-3 text-ink-soft hover:bg-paper-deep hover:text-ink;
+  }
+  .btn-danger {
+    @apply bg-danger text-white hover:bg-[#7f2222];
+  }
+
+  .field-input {
+    @apply block min-h-11 w-full rounded-lg border border-ink/55 bg-card px-3 py-2 text-base text-ink placeholder:text-ink-soft focus:border-terracotta focus:outline-none focus-visible:outline-3 focus-visible:outline-offset-1 focus-visible:outline-terracotta aria-invalid:border-danger;
+  }
+
+  .link {
+    @apply font-semibold text-terracotta underline decoration-terracotta/40 underline-offset-4 hover:decoration-terracotta;
+  }
+
+  .page-sheet {
+    @apply rounded-sm border border-line bg-card shadow-page;
+  }
+
+  .eyebrow {
+    @apply text-sm font-semibold tracking-[0.14em] text-terracotta uppercase;
+  }
+
+  .tag-chip {
+    @apply inline-flex items-center rounded-full border border-line bg-paper px-2.5 py-0.5 text-sm text-ink-soft;
+  }
+
+  .ornament {
+    @apply flex items-center gap-3 text-terracotta;
+  }
+  .ornament::before,
+  .ornament::after {
+    content: '';
+    @apply h-px flex-1 bg-line;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  body {
+    background: white;
+  }
+  .page-sheet {
+    box-shadow: none;
+    border: none;
+  }
+}

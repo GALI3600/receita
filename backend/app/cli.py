@@ -1,6 +1,7 @@
 """Linha de comando para testar o pipeline.
 
 uv run python -m app.cli import <url> [--skip-llm] [--json]
+uv run python -m app.cli seed-demo --email <email>   # só em ENVIRONMENT=development
 """
 
 import argparse
@@ -13,6 +14,7 @@ from typing import Any
 from app.db import SessionLocal, engine
 from app.errors import PipelineError
 from app.models import ImportStatus, Video
+from app.services.demo import DEMO_VIDEOS, DemoSeedError, seed_demo
 from app.services.pipeline import process_video
 from app.services.recipe_llm import format_timestamp
 from app.services.transcription import word_count
@@ -87,6 +89,22 @@ async def _import(url: str, *, skip_llm: bool, as_json: bool) -> int:
     return 0
 
 
+async def _seed_demo(email: str) -> int:
+    try:
+        async with SessionLocal() as session:
+            try:
+                recipe_ids = await seed_demo(session, email)
+            except DemoSeedError as exc:
+                print(f"erro: {exc}", file=sys.stderr)
+                return 1
+    finally:
+        await engine.dispose()
+
+    for demo, recipe_id in zip(DEMO_VIDEOS, recipe_ids, strict=True):
+        print(f"{recipe_id}  {demo.recipe['title']}  [{demo.youtube_id}]")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description="Ferramentas do Receita")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -95,7 +113,16 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--skip-llm", action="store_true", help="para depois da transcrição")
     cmd.add_argument("--json", action="store_true", help="imprime o Video completo em JSON")
     cmd.add_argument("-v", "--verbose", action="store_true", help="mostra os logs")
+    seed = sub.add_parser(
+        "seed-demo",
+        help="põe receitas de demonstração no livro de um usuário (só em development)",
+    )
+    seed.add_argument("--email", required=True, help="e-mail de uma conta já cadastrada")
     args = parser.parse_args(argv)
+
+    if args.command == "seed-demo":
+        logging.basicConfig(level=logging.WARNING)
+        return asyncio.run(_seed_demo(args.email))
 
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,

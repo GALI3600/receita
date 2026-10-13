@@ -119,6 +119,31 @@ curl -b cookies.txt -X POST localhost:8000/imports -H 'X-Requested-With: curl' \
   -H 'Content-Type: application/json' -d '{"url": "https://youtu.be/<id>"}'
 ```
 
+## Site (frontend)
+
+React + TypeScript + Vite, Tailwind, React Router e TanStack Query. Rotas: `/` (apresentação),
+`/cadastro`, `/entrar`, `/verificar-email`, `/esqueci-senha`, `/redefinir-senha`, `/livro`, `/nova`
+(o import em andamento fica na URL, `/nova?import=<id>`), `/receitas/:id` e `/conta`.
+
+- O cliente da API (`src/api/`) usa o cookie de sessão (mesma origem, via `/api`), manda
+  `X-Requested-With` em todo pedido que muda estado e transforma o erro padrão em `ApiError`
+  (`code`, `message`, `status`, `retryAfter`).
+- Com `VITE_TURNSTILE_SITE_KEY` definido, o cadastro mostra o captcha do Cloudflare Turnstile.
+- A página da receita usa a YouTube IFrame Player API (`youtube-nocookie.com`): o tempo de cada
+  passo leva o vídeo àquele momento.
+
+### Receitas de demonstração
+
+Sem `ANTHROPIC_API_KEY` os imports novos terminam em `llm_missing_key`. Para ter receitas na
+interface, depois de criar a conta pelo site:
+
+```bash
+docker compose exec api python -m app.cli seed-demo --email ana@example.com
+```
+
+Grava três vídeos reais do YouTube com uma receita pronta e põe as receitas no livro da conta. Só
+roda com `ENVIRONMENT=development`.
+
 ## Pipeline pela linha de comando
 
 Transforma um link em receita e salva o `Video` no banco (precisa do banco migrado):
@@ -154,5 +179,8 @@ docker compose exec db createdb -U receita receita_test   # uma vez
 
 ```bash
 cd backend && uv run ruff check . && uv run ruff format --check . && uv run pytest
-cd frontend && npm run lint && npm run format:check && npm run build
+cd frontend && npm run lint && npm run format:check && npm test && npm run build
 ```
+
+Os testes de ponta a ponta (Playwright) rodam contra o Docker Compose de pé; veja
+[`frontend/e2e/README.md`](frontend/e2e/README.md).
