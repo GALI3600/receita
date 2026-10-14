@@ -83,11 +83,20 @@ class Settings(BaseSettings):
     daily_failed_import_limit: int = Field(default=20, ge=1)
     # Teto do gasto diário (UTC) com o Claude; ao atingir, vídeos novos ficam para o dia seguinte.
     daily_llm_budget_usd: float = Field(default=10.0, ge=0)
+    # Teto diário (UTC) só das chamadas do eval (python -m app.cli llm-eval), fora do de produção.
+    eval_daily_llm_budget_usd: float = Field(default=5.0, ge=0)
+    # Tokens de saída reservados no orçamento enquanto a chamada está em andamento (maior saída
+    # medida: ~10k); limitado ao max_tokens da chamada.
+    llm_reserved_output_tokens: int = Field(default=12_000, ge=1)
 
     max_video_duration_min: int = 60
     # Arquivo de cookies (formato Netscape) de uma conta do YouTube para o yt-dlp, quando o IP do
     # servidor é barrado como robô. Vazio: sem cookies.
     ytdlp_cookies_file: str = ""
+
+    # TTL do marcador de cache do prompt do Claude: "5m" (padrão) ou "1h" (escrita 2× a entrada,
+    # vale com chamadas espaçadas de 5 a 60 min; ver `llm-cache-sim`).
+    llm_cache_ttl: Literal["5m", "1h"] = "5m"
 
     whisper_model: str = "small"
     whisper_device: Literal["cpu", "cuda", "auto"] = "cpu"

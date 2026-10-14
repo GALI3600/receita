@@ -11,6 +11,7 @@ from app.errors import (
     LLMError,
     LLMInvalidOutputError,
     LLMMissingKeyError,
+    LLMOutputTooLongError,
     LLMRefusedError,
     LLMUnavailableError,
 )
@@ -20,6 +21,7 @@ from app.services.recipe_llm import (
     MODEL,
     PROMPT_VERSION,
     SYSTEM_PROMPT,
+    LLMConfig,
     VideoContext,
     build_user_message,
     format_timestamp,
@@ -85,14 +87,20 @@ def _message(**overrides: Any) -> dict[str, Any]:
 
 
 class FakeAPI:
-    """Servidor falso da Messages API: grava os pedidos e devolve respostas prontas."""
+    """Servidor falso da Messages API: grava os pedidos e devolve respostas prontas.
 
-    def __init__(self, *responses: httpx2.Response) -> None:
+    Com `error`, cada pedido levanta essa exceção do transporte (conexão, timeout).
+    """
+
+    def __init__(self, *responses: httpx2.Response, error: Exception | None = None) -> None:
         self.responses = list(responses)
+        self.error = error
         self.requests: list[httpx2.Request] = []
 
     def handler(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
+        if self.error is not None:
+            raise self.error
         return self.responses.pop(0) if len(self.responses) > 1 else self.responses[0]
 
     def client(self, max_retries: int = 0) -> anthropic.AsyncAnthropic:
@@ -128,6 +136,7 @@ async def test_generate_recipe_success_sends_documented_request() -> None:
 
     body = api.body
     assert body["model"] == "claude-opus-5-5"
+    assert body["max_tokens"] == 20000
     assert body["output_config"]["effort"] == "medium"
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert "is_recipe" in body["output_config"]["format"]["schema"]["properties"]
@@ -142,6 +151,7 @@ async def test_generate_recipe_success_sends_documented_request() -> None:
     assert result.model == MODEL
     assert result.prompt_version == PROMPT_VERSION
     assert result.usage == USAGE
+    assert (result.request_id, result.stop_reason) == ("req_test", "end_turn")
     recipe = result.recipe
     assert recipe.is_recipe
     assert [(s.order, s.text, s.video_timestamp_s) for s in recipe.steps] == [
@@ -216,13 +226,84 @@ async def test_generate_recipe_not_a_recipe_is_returned() -> None:
     ids=["json-cortado", "sem-texto"],
 )
 async def test_generate_recipe_max_tokens(content: list[dict[str, Any]]) -> None:
-    usage = {"input_tokens": 50000, "output_tokens": 16000}
+    usage = {"input_tokens": 50000, "output_tokens": 20000}
     api = FakeAPI(_ok(_message(content=content, stop_reason="max_tokens", usage=usage)))
 
-    with pytest.raises(LLMInvalidOutputError) as exc_info:
+    with pytest.raises(LLMOutputTooLongError) as exc_info:
         await generate_recipe(VIDEO, client=api.client())
-    assert exc_info.value.detail == "resposta cortada por max_tokens"
+    assert exc_info.value.code == "llm_output_too_long"
+    assert exc_info.value.detail == "resposta cortada por max_tokens (20000)"
     assert exc_info.value.llm_usage == usage
+    assert exc_info.value.llm_stop_reason == "max_tokens"
+    assert exc_info.value.llm_request_id == "req_test"
+
+
+async def test_config_is_sent() -> None:
+    api = FakeAPI(_ok(_message(model="claude-haiku-5-5")))
+    config = LLMConfig(model="claude-haiku-5-5", effort="low", max_tokens=8000, fallbacks=False)
+
+    result = await generate_recipe(VIDEO, client=api.client(), config=config)
+
+    body = api.body
+    assert (body["model"], body["max_tokens"]) == ("claude-haiku-5-5", 8000)
+    assert body["output_config"]["effort"] == "low"
+    assert result.model == "claude-haiku-5-5"
+
+
+async def test_config_without_fallbacks_sends_no_beta() -> None:
+    api = FakeAPI(_ok(_message()))
+
+    await generate_recipe(VIDEO, client=api.client(), config=LLMConfig(fallbacks=False))
+
+    assert "fallbacks" not in api.body
+    assert "anthropic-beta" not in api.requests[-1].headers
+
+
+async def test_config_without_effort_omits_output_config_effort() -> None:
+    api = FakeAPI(_ok(_message()))
+
+    await generate_recipe(VIDEO, client=api.client(), config=LLMConfig(effort=None))
+
+    # O formato da saída continua em output_config; só o effort sai.
+    assert "effort" not in api.body["output_config"]
+    assert api.body["output_config"]["format"]["type"] == "json_schema"
+
+
+def test_config_rejects_max_tokens_that_need_streaming() -> None:
+    assert LLMConfig(max_tokens=21333).max_tokens == recipe_llm.MAX_NONSTREAMING_TOKENS
+    with pytest.raises(ValueError, match="streaming"):
+        LLMConfig(max_tokens=21334)
+    with pytest.raises(ValueError, match="streaming"):
+        LLMConfig(max_tokens=0)
+
+
+async def test_largest_nonstreaming_ceiling_passes_the_sdk_check() -> None:
+    # O SDK recusa antes de enviar quando a chamada sem stream poderia passar de 10 min.
+    api = FakeAPI(_ok(_message()))
+    config = LLMConfig(max_tokens=recipe_llm.MAX_NONSTREAMING_TOKENS)
+
+    await generate_recipe(VIDEO, client=api.client(), config=config)
+
+    assert api.body["max_tokens"] == 21333
+
+
+def test_build_system_1h_ttl() -> None:
+    [block] = recipe_llm.build_system("1h")
+
+    assert block["text"] == SYSTEM_PROMPT
+    assert block["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert recipe_llm.build_system("5m") == recipe_llm.build_system()
+
+
+async def test_default_config_follows_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(get_settings(), "llm_cache_ttl", "1h")
+    api = FakeAPI(_ok(_message()))
+
+    await generate_recipe(VIDEO, client=api.client())
+
+    assert recipe_llm.default_config() == LLMConfig(cache_ttl="1h")
+    assert api.body["system"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert api.body["fallbacks"] == "default"
 
 
 async def test_generate_recipe_output_outside_schema_keeps_usage() -> None:
@@ -303,6 +384,36 @@ async def test_generate_recipe_recovers_after_rate_limit() -> None:
 
     assert result.recipe.title == "Bolo de cenoura"
     assert len(api.requests) == 2
+
+
+@pytest.mark.parametrize(
+    ("error", "maybe_billed"),
+    [
+        (httpx2.ReadTimeout("lento"), True),
+        (httpx2.RemoteProtocolError("conexão caiu no meio da resposta"), True),
+        (httpx2.ConnectError("recusada"), False),
+        (httpx2.ConnectTimeout("sem conexão"), False),
+    ],
+)
+async def test_generate_recipe_read_timeout_may_be_billed(
+    error: Exception, maybe_billed: bool
+) -> None:
+    api = FakeAPI(error=error)
+
+    with pytest.raises(LLMUnavailableError) as exc_info:
+        await generate_recipe(VIDEO, client=api.client())
+
+    assert exc_info.value.llm_maybe_billed is maybe_billed
+    assert exc_info.value.llm_usage is None
+    assert len(api.requests) == 1
+
+
+def test_estimate_prompt_is_conservative() -> None:
+    estimate = recipe_llm.estimate_prompt(VIDEO)
+
+    # Prefixo real medido com o prompt de 2026-10-14.2: 5.849 tokens.
+    assert estimate.prefix_tokens >= 5849
+    assert estimate.input_tokens >= len(build_user_message(VIDEO)) / 2
 
 
 @pytest.mark.parametrize("status", [400, 401, 404])

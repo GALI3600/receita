@@ -54,3 +54,5 @@ class Import(UUIDPrimaryKey, Timestamps, Base):
     # Quando o import gastou recurso caro: uma chamada paga ao Claude ou o envio do vídeo para o
     # whisper. Se ele falhar, conta no limite diário de falhas (`DAILY_FAILED_IMPORT_LIMIT`).
     cost_incurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Primeira vez que o import foi adiado por falta de orçamento; não volta a nulo ao retomar.
+    deferred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -1,12 +1,15 @@
 """Geração da receita estruturada com o Claude a partir dos dados e da transcrição do vídeo."""
 
 import html
+import json
 import logging
+import math
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import anthropic
+import httpx2
 from anthropic.types.beta import BetaTextBlockParam
 from pydantic import ValidationError
 
@@ -15,6 +18,7 @@ from app.errors import (
     LLMError,
     LLMInvalidOutputError,
     LLMMissingKeyError,
+    LLMOutputTooLongError,
     LLMRefusedError,
     LLMUnavailableError,
     PipelineError,
@@ -24,15 +28,33 @@ from app.schemas.transcript import Segment, TranscriptSource
 
 logger = logging.getLogger(__name__)
 
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+CacheTTL = Literal["5m", "1h"]
+
 MODEL = "claude-opus-5-5"
 PROMPT_VERSION = "2026-10-14.2"
-# O raciocínio (sempre ligado neste modelo) também conta para max_tokens.
-MAX_TOKENS = 16000
-EFFORT = "medium"
+# O raciocínio (sempre ligado neste modelo) também conta. A maior saída medida usou 63% de
+# 16000; um corte não é tentado de novo no mesmo teto (LLMOutputTooLongError).
+MAX_TOKENS = 20000
+EFFORT: Effort = "medium"
 MAX_RETRIES = 3
+# Acima disso o SDK exige streaming ou timeout explícito numa chamada sem stream
+# (`_calculate_nonstreaming_timeout`: 3600 s × max_tokens / 128000 > 600 s).
+MAX_NONSTREAMING_TOKENS = 128_000 * 600 // 3600  # 21333
 # Forma "default" dos fallbacks no servidor: em recusa por política, a própria API refaz o
 # pedido no modelo recomendado para a categoria. Esse header vale só para a forma "default".
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# Modelos com fallback no servidor [RF]. Haiku 5.5 tem classificador mas não fallback: com
+# "default" a recusa continua recusa e uma lista de modelos dá 400.
+SERVER_FALLBACK_MODELS = frozenset(
+    {"claude-fable-5-1", "claude-fable-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
+)
+# Estimativa local de tokens para reservar o orçamento antes da chamada: conservadora (menor
+# razão medida nos vídeos do eval: 1,45 caractere por token; o prefixo fica em ~2).
+CHARS_PER_TOKEN_ESTIMATE = 1.4
+# Falhou ao conectar: o pedido não saiu. Qualquer outra falha de conexão (timeout de leitura,
+# conexão derrubada no meio da resposta) pode ter sido processada e cobrada.
+_NOT_SENT = (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout)
 
 # Limites da entrada: a legenda manual e a descrição são escritas por quem sobe o vídeo, e o
 # custo da chamada cresce com elas. A descrição do YouTube tem no máximo 5000 caracteres; a
@@ -176,6 +198,28 @@ cite as outras no `summary`.
 
 
 @dataclass(frozen=True, slots=True)
+class LLMConfig:
+    """Como a receita é pedida. O padrão é o de produção; o eval monta outras."""
+
+    model: str = MODEL
+    effort: Effort | None = EFFORT  # None: sem output_config.effort (modelo sem effort)
+    max_tokens: int = MAX_TOKENS
+    fallbacks: bool = True
+    cache_ttl: CacheTTL = "5m"
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_tokens <= MAX_NONSTREAMING_TOKENS:
+            raise ValueError(
+                f"max_tokens deve ficar entre 1 e {MAX_NONSTREAMING_TOKENS} (sem streaming)"
+            )
+
+
+def default_config() -> LLMConfig:
+    """Configuração de produção; o TTL do cache vem de LLM_CACHE_TTL."""
+    return LLMConfig(cache_ttl=get_settings().llm_cache_ttl)
+
+
+@dataclass(frozen=True, slots=True)
 class VideoContext:
     title: str
     channel: str | None
@@ -191,6 +235,14 @@ class RecipeGeneration:
     model: str
     usage: dict[str, Any]
     prompt_version: str
+    request_id: str | None = None
+    stop_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PromptEstimate:
+    prefix_tokens: int  # system + schema (prefixo cacheado)
+    input_tokens: int  # mensagem do usuário
 
 
 def format_timestamp(seconds: float) -> str:
@@ -244,8 +296,30 @@ def build_user_message(video: VideoContext) -> str:
     )
 
 
-def build_system() -> list[BetaTextBlockParam]:
-    # Texto fixo e idêntico em toda chamada: é o prefixo cacheado.
+@lru_cache(maxsize=1)
+def _schema_chars() -> int:
+    return len(json.dumps(RecipeLLM.model_json_schema(), ensure_ascii=False))
+
+
+def estimate_prompt(video: VideoContext) -> PromptEstimate:
+    """Tokens da chamada estimados sem chamar a API (ver `CHARS_PER_TOKEN_ESTIMATE`)."""
+    return PromptEstimate(
+        prefix_tokens=math.ceil((len(SYSTEM_PROMPT) + _schema_chars()) / CHARS_PER_TOKEN_ESTIMATE),
+        input_tokens=math.ceil(len(build_user_message(video)) / CHARS_PER_TOKEN_ESTIMATE),
+    )
+
+
+def build_system(cache_ttl: CacheTTL = "5m") -> list[BetaTextBlockParam]:
+    # Texto fixo e idêntico em toda chamada: é o prefixo cacheado. O de 5 min vai sem `ttl`,
+    # nos mesmos bytes de antes da opção de 1 h (trocar o marcador não invalida o cache).
+    if cache_ttl == "1h":
+        return [
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            }
+        ]
     return [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
 
 
@@ -385,10 +459,22 @@ def _without_method(recipe: RecipeLLM) -> RecipeLLM:
 
 
 async def generate_recipe(
-    video: VideoContext, *, client: anthropic.AsyncAnthropic | None = None
+    video: VideoContext,
+    *,
+    client: anthropic.AsyncAnthropic | None = None,
+    config: LLMConfig | None = None,
 ) -> RecipeGeneration:
-    """Gera a receita. Falhas depois de uma chamada paga levam `llm_model` e `llm_usage`."""
+    """Gera a receita. Falhas depois de uma chamada paga levam `llm_model` e `llm_usage`.
+
+    `config` padrão é o de produção (`default_config`).
+    """
+    config = config or default_config()
     client = client or get_client()
+    kwargs: dict[str, Any] = {}
+    if config.fallbacks:
+        kwargs.update(betas=[FALLBACK_BETA], fallbacks="default")
+    if config.effort is not None:
+        kwargs["output_config"] = {"effort": config.effort}
 
     try:
         # `messages.parse` existe também em `beta.messages`, que é onde o SDK aceita `fallbacks`
@@ -398,25 +484,27 @@ async def generate_recipe(
         # o usage. Por isso a chamada vai por `with_raw_response`: o corpo bruto é lido
         # primeiro e o `raw.parse()` (que valida) só roda depois das checagens.
         raw = await client.beta.messages.with_raw_response.parse(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=build_system(),
+            model=config.model,
+            max_tokens=config.max_tokens,
+            system=build_system(config.cache_ttl),
             messages=[{"role": "user", "content": build_user_message(video)}],
-            output_config={"effort": EFFORT},
             output_format=RecipeLLM,
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
+            **kwargs,
         )
         body = cast(dict[str, Any], await raw.json())
     except anthropic.APIConnectionError as exc:
-        raise LLMUnavailableError(detail=f"{type(exc).__name__}: {exc}") from exc
+        # Inclui o APITimeoutError. Com os retries do SDK, o `__cause__` é o da última tentativa.
+        raise LLMUnavailableError(
+            detail=f"{type(exc).__name__}: {exc}",
+            llm_maybe_billed=not isinstance(exc.__cause__, _NOT_SENT),
+        ) from exc
     except anthropic.APIStatusError as exc:
         # 429 e 5xx já passaram pelos retries do SDK (MAX_RETRIES); o resto é erro definitivo.
         if exc.status_code == 429 or exc.status_code >= 500:
             raise LLMUnavailableError(detail=f"{exc.status_code}: {exc}") from exc
         raise LLMError(detail=f"{exc.status_code}: {exc}") from exc
 
-    model = str(body.get("model") or MODEL)
+    model = str(body.get("model") or config.model)
     stop_reason = body.get("stop_reason")
     usage = {k: v for k, v in (body.get("usage") or {}).items() if v is not None}
     logger.info(
@@ -428,13 +516,21 @@ async def generate_recipe(
     )
 
     def failure(error: type[PipelineError], detail: str) -> PipelineError:
-        return error(detail=detail, llm_model=model, llm_usage=usage)
+        return error(
+            detail=detail,
+            llm_model=model,
+            llm_usage=usage,
+            llm_request_id=raw.request_id,
+            llm_stop_reason=stop_reason,
+        )
 
     if stop_reason == "refusal":
         category = (body.get("stop_details") or {}).get("category")
         raise failure(LLMRefusedError, f"recusa (categoria={category})")
     if stop_reason == "max_tokens":
-        raise failure(LLMInvalidOutputError, "resposta cortada por max_tokens")
+        raise failure(
+            LLMOutputTooLongError, f"resposta cortada por max_tokens ({config.max_tokens})"
+        )
 
     try:
         response = await raw.parse()
@@ -458,4 +554,6 @@ async def generate_recipe(
         model=response.model,
         usage=usage,
         prompt_version=PROMPT_VERSION,
+        request_id=raw.request_id,
+        stop_reason=stop_reason,
     )

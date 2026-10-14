@@ -1,13 +1,19 @@
+import asyncio
 from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from typing import Any
 
+import httpx2
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.config import get_settings
 from app.errors import (
     InvalidUrlError,
+    LLMBudgetExceededError,
     LLMInvalidOutputError,
+    LLMOutputTooLongError,
     LLMRefusedError,
     LLMUnavailableError,
     NotARecipeError,
@@ -16,11 +22,11 @@ from app.errors import (
     VideoUnavailableError,
     YoutubeBlockedError,
 )
-from app.models import ImportStatus, LLMCall, Video
+from app.models import ImportStatus, LLMCall, LLMPurpose, Video
 from app.schemas.recipe_llm import RecipeLLM
 from app.schemas.transcript import Segment, TranscriptSource
-from app.services import pipeline, recipe_llm, transcription, youtube
-from app.services.recipe_llm import PROMPT_VERSION, RecipeGeneration, VideoContext
+from app.services import pipeline, quotas, recipe_llm, transcription, youtube
+from app.services.recipe_llm import PROMPT_VERSION, LLMConfig, RecipeGeneration, VideoContext
 from app.services.transcription import Transcript
 from app.services.youtube import VideoMetadata
 from tests.test_recipe_llm import USAGE, FakeAPI, _message, _ok
@@ -75,6 +81,7 @@ class FakeServices:
     session: AsyncSession | None = None
     calls: list[str] = field(default_factory=list)
     contexts: list[VideoContext] = field(default_factory=list)
+    configs: list[LLMConfig | None] = field(default_factory=list)
     open_transactions: list[str] = field(default_factory=list)
 
     def _network(self, call: str) -> None:
@@ -93,9 +100,12 @@ class FakeServices:
         self._network("transcribe")
         return self.transcript
 
-    async def generate_recipe(self, video: VideoContext, **_: Any) -> RecipeGeneration:
+    async def generate_recipe(
+        self, video: VideoContext, *, config: LLMConfig | None = None, **_: Any
+    ) -> RecipeGeneration:
         self._network("llm")
         self.contexts.append(video)
+        self.configs.append(config)
         if self.llm_error:
             raise self.llm_error
         return RecipeGeneration(
@@ -127,6 +137,7 @@ async def test_process_video_full_run(session: AsyncSession, fake: FakeServices)
     assert stages == [ImportStatus.FETCHING, ImportStatus.TRANSCRIBING, ImportStatus.GENERATING]
     assert fake.contexts[0].segments == SPEECH
     assert fake.contexts[0].transcript_source == TranscriptSource.MANUAL
+    assert fake.configs == [recipe_llm.default_config()]
 
     session.expunge_all()
     saved = await session.scalar(select(Video).where(Video.youtube_id == YOUTUBE_ID))
@@ -144,6 +155,15 @@ async def test_process_video_full_run(session: AsyncSession, fake: FakeServices)
     assert [(c.video_id, c.model, c.usage, c.error_code) for c in calls] == [
         (video.id, "claude-opus-5-5", LLM_USAGE, None)
     ]
+    [call] = calls
+    assert call.purpose is LLMPurpose.CLI
+    assert call.cost_usd == quotas.llm_cost_usd("claude-opus-5-5", LLM_USAGE)
+    assert call.latency_ms is not None and call.latency_ms >= 0
+    assert (call.effort, call.max_tokens, call.cache_marker) == (
+        "medium",
+        recipe_llm.MAX_TOKENS,
+        "5m",
+    )
     assert fake.open_transactions == []
 
 
@@ -506,3 +526,247 @@ async def test_process_video_handles_concurrent_insert(
     assert video.title == META.title
     assert video.transcript == SPEECH
     assert await session.scalar(select(func.count()).select_from(Video)) == 1
+
+
+async def test_reservation_exists_during_the_call(
+    session: AsyncSession,
+    session_factory: async_sessionmaker[AsyncSession],
+    fake: FakeServices,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str | None, Decimal | None, dict[str, Any]]] = []
+
+    async def generate_recipe(video: VideoContext, **kwargs: Any) -> RecipeGeneration:
+        # Outra sessão: a reserva já foi comitada e conta no orçamento de quem vier depois.
+        async with session_factory() as other:
+            call = await other.scalar(select(LLMCall))
+            assert call is not None
+            seen.append((call.error_code, call.cost_usd, call.usage))
+        return await fake.generate_recipe(video, **kwargs)
+
+    monkeypatch.setattr(recipe_llm, "generate_recipe", generate_recipe)
+
+    await pipeline.process_video(URL, session)
+
+    [(error_code, cost_usd, usage)] = seen
+    assert error_code == "llm_in_progress"
+    assert cost_usd is not None and cost_usd > 0
+    assert usage == {}
+
+
+async def test_sdk_timeout_keeps_estimated_cost(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeAPI(error=httpx2.ReadTimeout("lento"))
+    monkeypatch.setattr(recipe_llm, "generate_recipe", REAL_GENERATE_RECIPE)
+    monkeypatch.setattr(recipe_llm, "get_client", api.client)
+
+    for _ in range(3):
+        with pytest.raises(LLMUnavailableError) as exc_info:
+            await pipeline.process_video(URL, session)
+        assert exc_info.value.llm_maybe_billed
+
+    # Timeout não é falha determinística: o vídeo continua indo para o Claude.
+    assert len(api.requests) == 3
+    calls = (await session.scalars(select(LLMCall))).all()
+    assert [(c.error_code, c.usage) for c in calls] == [("llm_timeout", {})] * 3
+    assert all(c.cost_usd is not None and c.cost_usd > 0 for c in calls)
+    assert all(c.latency_ms is not None for c in calls)
+
+
+async def test_unpaid_connection_failure_is_discarded(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeAPI(error=httpx2.ConnectError("recusada"))
+    monkeypatch.setattr(recipe_llm, "generate_recipe", REAL_GENERATE_RECIPE)
+    monkeypatch.setattr(recipe_llm, "get_client", api.client)
+
+    with pytest.raises(LLMUnavailableError) as exc_info:
+        await pipeline.process_video(URL, session)
+
+    assert not exc_info.value.llm_maybe_billed
+    assert len(api.requests) == 1
+    assert await session.scalar(select(func.count()).select_from(LLMCall)) == 0
+
+
+async def test_eval_failures_do_not_block_production(
+    session: AsyncSession, fake: FakeServices
+) -> None:
+    video = await pipeline.process_video(URL, session, skip_llm=True)
+    session.add(
+        LLMCall(
+            video_id=video.id,
+            model="claude-haiku-5-5",
+            prompt_version=PROMPT_VERSION,
+            usage=LLM_USAGE,
+            error_code="llm_refused",
+            purpose=LLMPurpose.EVAL,
+        )
+    )
+    await session.commit()
+
+    video = await pipeline.process_video(URL, session)
+
+    assert fake.calls.count("llm") == 1
+    assert video.generated_recipe is not None
+
+
+async def test_cancelled_call_is_marked_timeout(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def cancelled(video: VideoContext, **_: Any) -> RecipeGeneration:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        await asyncio.Event().wait()
+        raise AssertionError("não deveria terminar")
+
+    monkeypatch.setattr(recipe_llm, "generate_recipe", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.process_video(URL, session)
+    task = asyncio.current_task()
+    assert task is not None
+    task.uncancel()
+
+    calls = (await session.scalars(select(LLMCall))).all()
+    assert [(c.error_code, c.usage) for c in calls] == [("llm_timeout", {})]
+    assert calls[0].cost_usd is not None and calls[0].cost_usd > 0
+    assert calls[0].latency_ms is not None
+
+
+async def test_unexpected_error_after_reservation_is_marked_timeout(
+    session: AsyncSession, fake: FakeServices
+) -> None:
+    fake.llm_error = RuntimeError("bug depois da resposta")
+
+    with pytest.raises(RuntimeError):
+        await pipeline.process_video(URL, session)
+
+    calls = (await session.scalars(select(LLMCall))).all()
+    assert [(c.error_code, c.usage) for c in calls] == [("llm_timeout", {})]
+    assert calls[0].cost_usd is not None and calls[0].cost_usd > 0
+
+
+async def test_no_call_is_recorded_when_the_estimate_does_not_fit(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Sem gasto nenhum hoje, mas a estimativa (12k de saída reservados) passa do teto.
+    monkeypatch.setattr(get_settings(), "daily_llm_budget_usd", 0.01)
+
+    with pytest.raises(LLMBudgetExceededError):
+        await pipeline.process_video(URL, session)
+
+    assert "llm" not in fake.calls
+    assert await session.scalar(select(func.count()).select_from(LLMCall)) == 0
+
+
+async def test_output_too_long_is_not_retried_with_the_same_ceiling(
+    session: AsyncSession, fake: FakeServices
+) -> None:
+    fake.llm_error = _failed_call(
+        LLMOutputTooLongError, llm_stop_reason="max_tokens", llm_request_id="req_corte"
+    )
+
+    with pytest.raises(LLMOutputTooLongError):
+        await pipeline.process_video(URL, session)
+    fake.calls.clear()
+    with pytest.raises(LLMOutputTooLongError) as exc_info:
+        await pipeline.process_video(URL, session)
+
+    assert "llm" not in fake.calls
+    assert exc_info.value.llm_usage is None  # a segunda vez não houve chamada paga
+    calls = (await session.scalars(select(LLMCall))).all()
+    assert [(c.error_code, c.max_tokens, c.stop_reason, c.request_id) for c in calls] == [
+        ("llm_output_too_long", recipe_llm.MAX_TOKENS, "max_tokens", "req_corte")
+    ]
+
+
+async def test_higher_ceiling_allows_retry_after_cut(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake.llm_error = _failed_call(LLMOutputTooLongError)
+    with pytest.raises(LLMOutputTooLongError):
+        await pipeline.process_video(URL, session)
+
+    higher = LLMConfig(max_tokens=recipe_llm.MAX_TOKENS + 1000)
+    monkeypatch.setattr(recipe_llm, "default_config", lambda: higher)
+    fake.llm_error = None
+    video = await pipeline.process_video(URL, session)
+
+    assert fake.calls.count("llm") == 2
+    assert fake.configs[-1] == higher
+    assert video.generated_recipe is not None
+    calls = (await session.scalars(select(LLMCall).order_by(LLMCall.started_at))).all()
+    assert [(c.error_code, c.max_tokens) for c in calls] == [
+        ("llm_output_too_long", recipe_llm.MAX_TOKENS),
+        (None, recipe_llm.MAX_TOKENS + 1000),
+    ]
+
+
+async def test_lower_ceiling_after_cut_still_gives_up(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake.llm_error = _failed_call(LLMOutputTooLongError)
+    with pytest.raises(LLMOutputTooLongError):
+        await pipeline.process_video(URL, session)
+
+    monkeypatch.setattr(recipe_llm, "default_config", lambda: LLMConfig(max_tokens=8000))
+    with pytest.raises(LLMOutputTooLongError):
+        await pipeline.process_video(URL, session)
+
+    assert fake.calls.count("llm") == 1
+
+
+async def test_call_metadata_is_recorded(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def generate_recipe(video: VideoContext, **kwargs: Any) -> RecipeGeneration:
+        generation = await fake.generate_recipe(video, **kwargs)
+        return replace(generation, request_id="req_x", stop_reason="end_turn")
+
+    monkeypatch.setattr(recipe_llm, "generate_recipe", generate_recipe)
+
+    await pipeline.process_video(URL, session)
+
+    call = await session.scalar(select(LLMCall))
+    assert call is not None
+    assert (call.request_id, call.stop_reason) == ("req_x", "end_turn")
+
+
+async def test_cache_ttl_comes_from_settings(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "llm_cache_ttl", "1h")
+
+    await pipeline.process_video(URL, session)
+
+    assert fake.configs == [LLMConfig(cache_ttl="1h")]
+    call = await session.scalar(select(LLMCall))
+    assert call is not None and call.cache_marker == "1h"
+
+
+async def test_cost_of_fallback_write_uses_request_cache_marker(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(get_settings(), "llm_cache_ttl", "1h")
+    # A tentativa recusada escreveu o prefixo; a que respondeu só leu o cache.
+    usage = {
+        "cache_creation_input_tokens": 0,
+        "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0},
+        "iterations": [
+            {"model": "claude-opus-5-5", "cache_creation_input_tokens": 1_000_000},
+            {"model": "claude-opus-5", "cache_read_input_tokens": 1_000_000},
+        ],
+    }
+
+    async def generate_recipe(video: VideoContext, **kwargs: Any) -> RecipeGeneration:
+        generation = await fake.generate_recipe(video, **kwargs)
+        return replace(generation, model="claude-opus-5", usage=usage)
+
+    monkeypatch.setattr(recipe_llm, "generate_recipe", generate_recipe)
+
+    await pipeline.process_video(URL, session)
+
+    call = await session.scalar(select(LLMCall))
+    assert call is not None and call.cost_usd == Decimal("8.5")

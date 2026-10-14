@@ -3,6 +3,7 @@ from app.models.enums import (
     UNFINISHED_IMPORT_STATUSES,
     Difficulty,
     ImportStatus,
+    LLMPurpose,
     UserPlan,
 )
 from app.models.imports import Import
@@ -17,6 +18,7 @@ __all__ = [
     "Import",
     "ImportStatus",
     "LLMCall",
+    "LLMPurpose",
     "Recipe",
     "UNFINISHED_IMPORT_STATUSES",
     "User",

@@ -11,6 +11,15 @@ class Difficulty(StrEnum):
     HARD = "difícil"
 
 
+class LLMPurpose(StrEnum):
+    IMPORT = "import"
+    # Import que já tinha sido adiado por falta de orçamento (cron resume_deferred_imports).
+    DEFERRED = "deferred"
+    BACKFILL = "backfill"
+    EVAL = "eval"
+    CLI = "cli"
+
+
 class ImportStatus(StrEnum):
     PENDING = "pending"
     FETCHING = "fetching"

@@ -23,6 +23,7 @@ from app.errors import (
     InternalError,
     LLMBudgetExceededError,
     LLMMissingKeyError,
+    LLMOutputTooLongError,
     LLMRefusedError,
     LLMUnavailableError,
     NotEmbeddableError,
@@ -30,11 +31,11 @@ from app.errors import (
     TranscriptionGaveUpError,
     YoutubeBlockedError,
 )
-from app.models import Import, ImportStatus, LLMCall, Recipe, User, Video
+from app.models import Import, ImportStatus, LLMCall, LLMPurpose, Recipe, User, Video
 from app.schemas.imports import ImportOut
 from app.schemas.recipe_llm import RecipeLLM
 from app.schemas.transcript import Segment, TranscriptSource
-from app.services import imports, pipeline, recipe_llm, transcription, youtube
+from app.services import imports, llm_calls, pipeline, recipe_llm, transcription, youtube
 from app.services.locks import VideoLock
 from app.services.recipe_llm import PROMPT_VERSION, RecipeGeneration, VideoContext
 from app.services.transcription import Transcript
@@ -407,6 +408,27 @@ async def test_unexpected_error_fails_without_retry(
     assert "bug" not in (imp.error_message or "")
 
 
+async def test_output_too_long_fails_import_without_retry(
+    ctx: dict[str, Any], session: AsyncSession, fake: FakeServices
+) -> None:
+    fake.llm_error = LLMOutputTooLongError(
+        llm_model=recipe_llm.MODEL, llm_usage={"output_tokens": recipe_llm.MAX_TOKENS}
+    )
+    imp = await _new_import(session)
+
+    # Sem Retry: com o mesmo teto, o corte se repetiria.
+    assert await _run(ctx, imp) == "falhou: llm_output_too_long"
+
+    imp = await _reload(session, imp)
+    assert (imp.status, imp.error_code) == (ImportStatus.FAILED, "llm_output_too_long")
+    assert imp.error_message == LLMOutputTooLongError.default_message
+    assert imp.cost_incurred_at is not None
+    assert fake.calls.count("llm") == 1
+    call = await session.scalar(select(LLMCall))
+    assert call is not None
+    assert (call.error_code, call.max_tokens) == ("llm_output_too_long", recipe_llm.MAX_TOKENS)
+
+
 async def test_job_timeout_is_retried_then_fails(
     ctx: dict[str, Any],
     session: AsyncSession,
@@ -434,6 +456,10 @@ async def test_job_timeout_is_retried_then_fails(
     imp = await _reload(session, imp)
     assert (imp.status, imp.error_code) == (ImportStatus.FAILED, "import_timeout")
     assert fake.calls.count("llm") == retries + 1
+    # Cada tentativa cancelada fica com o custo estimado: a API pode ter cobrado.
+    calls = (await session.scalars(select(LLMCall))).all()
+    assert [(c.error_code, c.usage) for c in calls] == [("llm_timeout", {})] * (retries + 1)
+    assert all(c.cost_usd is not None and c.cost_usd > 0 for c in calls)
 
 
 async def test_job_timeout_in_the_middle_of_a_commit_is_retried(
@@ -783,6 +809,7 @@ async def _spend_today(session: AsyncSession, usd: int) -> LLMCall:
         model=recipe_llm.MODEL,
         prompt_version=PROMPT_VERSION,
         usage={"input_tokens": 0, "output_tokens": usd * 50_000},
+        purpose=LLMPurpose.IMPORT,
     )
     session.add(call)
     await session.commit()
@@ -799,6 +826,10 @@ async def test_new_recipe_uses_quota(
     imp = await _reload(session, imp)
     assert imp.charged_at is not None
     assert datetime.now(UTC) - imp.charged_at < timedelta(minutes=1)
+    assert imp.deferred_at is None
+    call = await session.scalar(select(LLMCall))
+    assert call is not None
+    assert (call.purpose, call.error_code) == (LLMPurpose.IMPORT, None)
 
 
 async def test_copy_does_not_use_quota(
@@ -973,7 +1004,10 @@ async def test_deferred_imports_resume_when_budget_frees_up(
     await _run(ctx, imp)
 
     assert await worker.resume_deferred_imports(ctx) == "orçamento esgotado; nada retomado"
-    assert (await _reload(session, imp)).status is ImportStatus.DEFERRED
+    imp = await _reload(session, imp)
+    assert imp.status is ImportStatus.DEFERRED
+    deferred_at = imp.deferred_at
+    assert deferred_at is not None
     assert await redis.queued_jobs() == []
 
     # Virou o dia: o gasto de ontem não conta mais.
@@ -992,7 +1026,46 @@ async def test_deferred_imports_resume_when_budget_frees_up(
     assert await _run(ctx, imp) == "concluído"
     imp = await _reload(session, imp)
     assert imp.status is ImportStatus.DONE and imp.charged_at is not None
+    assert imp.deferred_at == deferred_at
     assert fake.calls.count("llm") == 1
+    new_calls = (await session.scalars(select(LLMCall).where(LLMCall.id != call.id))).all()
+    assert [(c.purpose, c.error_code) for c in new_calls] == [(LLMPurpose.DEFERRED, None)]
+
+
+async def test_deferred_imports_wait_for_slack_for_a_whole_call(
+    ctx: dict[str, Any],
+    session: AsyncSession,
+    fake: FakeServices,
+    redis: ArqRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "daily_llm_budget_usd", 5.0)
+    await _spend_today(session, 5)
+    imp = await _new_import(session)
+    await _run(ctx, imp)
+    minimum = float(llm_calls.minimum_reservation_usd(recipe_llm.default_config()))
+
+    # Sobra folga, mas menos que a menor reserva: retomado, o import consultaria o YouTube de
+    # novo e voltaria a ser adiado.
+    monkeypatch.setattr(settings, "daily_llm_budget_usd", 5 + minimum - 0.001)
+    assert await worker.resume_deferred_imports(ctx) == "orçamento esgotado; nada retomado"
+    assert (await _reload(session, imp)).status is ImportStatus.DEFERRED
+    assert await redis.queued_jobs() == []
+
+    monkeypatch.setattr(settings, "daily_llm_budget_usd", 5 + minimum + 0.001)
+    assert await worker.resume_deferred_imports(ctx) == "1 retomado(s)"
+    assert (await _reload(session, imp)).status is ImportStatus.PENDING
+
+
+def test_deferral_keeps_the_first_date() -> None:
+    imp = Import(user_id=uuid.uuid4(), url="u", youtube_id=YOUTUBE_ID)
+    imports.mark_deferred(imp, LLMBudgetExceededError())
+    first = imp.deferred_at
+    imports.mark_resumed(imp)
+    imports.mark_deferred(imp, LLMBudgetExceededError())
+
+    assert first is not None and imp.deferred_at == first
 
 
 async def test_stale_recovery_leaves_deferred_imports_alone(

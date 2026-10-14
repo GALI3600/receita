@@ -1,0 +1,19 @@
+# Conjunto do eval (v1 a v3 do prompt, 2026-10-14): youtube_id e is_recipe esperado.
+# Linhas com # são comentário; sem o segundo campo, o esperado fica em branco.
+88syMwVL0dk true
+ZU_wbPigVRI true
+x40o71KuLtQ true
+-pRC-FQXLEI true
+k31sUAYnPwc true
+nAWHwvnO5SY true
+0QmeCM2x9Mo true
+OWLnnv4tsFQ true
+HOaJ6ak8hrA true
+wyuec0PPz68 true
+tzQOn3mU7EA true
+bXHUoszxL6A false
+KXcP15SaB_s true
+8uYzXzUHvYY true
+BiiPDwCbzbM true
+uc8Pwe7alJ8 true
+_T6jkRvhlkk true

@@ -6,9 +6,8 @@ vez e reaproveitadas (a receita só é refeita quando `PROMPT_VERSION` muda).
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +15,7 @@ from app.errors import (
     ErrorCode,
     ImportTimeoutError,
     LLMInvalidOutputError,
+    LLMOutputTooLongError,
     LLMRefusedError,
     NotARecipeError,
     NoTranscriptError,
@@ -23,8 +23,8 @@ from app.errors import (
     TranscriptionGaveUpError,
     YoutubeBlockedError,
 )
-from app.models import ImportStatus, LLMCall, Video
-from app.services import quotas, recipe_llm, transcription, youtube
+from app.models import ImportStatus, LLMCall, LLMPurpose, Video
+from app.services import llm_calls, recipe_llm, transcription, youtube
 from app.services.youtube import VideoMetadata
 
 logger = logging.getLogger(__name__)
@@ -34,11 +34,12 @@ StageCallback = Callable[[ImportStatus], Awaitable[None]]
 MIN_DESCRIPTION_WORDS = 15
 
 # Falhas do Claude que se repetem com a mesma entrada: depois de N chamadas pagas com o mesmo
-# prompt, o vídeo não volta para o Claude (até PROMPT_VERSION mudar). Erros transitórios
-# (indisponível, 5xx) não entram: não chegam a gerar cobrança.
+# prompt, o vídeo não volta para o Claude (até PROMPT_VERSION mudar; o corte por max_tokens,
+# até o teto subir). Erros transitórios (indisponível, 5xx, timeout) não entram.
 LLM_FAILURE_LIMITS: dict[ErrorCode, tuple[type[PipelineError], int]] = {
     ErrorCode.LLM_REFUSED: (LLMRefusedError, 1),
     ErrorCode.LLM_INVALID_OUTPUT: (LLMInvalidOutputError, 2),
+    ErrorCode.LLM_OUTPUT_TOO_LONG: (LLMOutputTooLongError, 1),
 }
 
 # Execuções do whisper por vídeo, somando todos os imports: as tentativas de um job (falhas
@@ -53,13 +54,15 @@ async def process_video(
     *,
     skip_llm: bool = False,
     on_stage: StageCallback | None = None,
+    purpose: LLMPurpose = LLMPurpose.CLI,
 ) -> Video:
     """Processa o vídeo de ponta a ponta e devolve o `Video` com transcrição e receita gerada.
 
     Levanta `PipelineError` (app.errors) com código estável em qualquer falha do domínio.
     A sessão precisa ter `expire_on_commit=False` (como `SessionLocal`): toda leitura termina
     com commit para que nenhuma transação fique aberta durante yt-dlp, whisper ou Claude.
-    O worker usa as mesmas etapas separadamente, para mandar o whisper para a fila dele.
+    É o caminho do CLI (`purpose` cli); o worker usa as mesmas etapas separadamente, para
+    mandar o whisper para a fila dele.
     """
 
     async def stage(status: ImportStatus) -> None:
@@ -75,7 +78,7 @@ async def process_video(
 
     if skip_llm:
         return video
-    video, _ = await generate(session, video, on_stage=on_stage)
+    video, _ = await generate(session, video, purpose=purpose, on_stage=on_stage)
     return video
 
 
@@ -116,10 +119,28 @@ async def save_transcript(
     )
 
 
+def llm_context(video: Video) -> recipe_llm.VideoContext:
+    """Entrada do Claude para o vídeo; `NoTranscriptError` se não há fala útil nem descrição."""
+    if video.transcript is None:
+        raise ValueError(f"vídeo {video.youtube_id} ainda não foi transcrito")
+    has_speech = transcription.is_useful_transcript(video.transcript, video.duration_s)
+    if not has_speech and len(video.description.split()) < MIN_DESCRIPTION_WORDS:
+        raise NoTranscriptError(detail="sem fala útil e descrição curta")
+    return recipe_llm.VideoContext(
+        title=video.title,
+        channel=video.channel,
+        duration_s=video.duration_s,
+        description=video.description,
+        segments=video.transcript if has_speech else [],
+        transcript_source=video.transcript_source if has_speech else None,
+    )
+
+
 async def generate(
     session: AsyncSession,
     video: Video,
     *,
+    purpose: LLMPurpose,
     on_stage: StageCallback | None = None,
     on_llm_call: Callable[[], None] | None = None,
 ) -> tuple[Video, bool]:
@@ -127,9 +148,12 @@ async def generate(
 
     Devolve o vídeo e se esta chamada gerou uma receita nova (só essas gastam a cota do
     usuário). Levanta `NotARecipeError`/`NoTranscriptError` quando o vídeo não traz receita e
-    `LLMBudgetExceededError` quando o orçamento do dia acabou e a receita ainda não existe.
-    `on_llm_call` roda quando a chamada ao Claude foi paga (com sucesso ou não), antes do commit
-    que a registra em `llm_calls`.
+    `LLMBudgetExceededError` quando a chamada não cabe no orçamento do dia e a receita ainda não
+    existe. A chamada usa a configuração de produção (`recipe_llm.default_config`). Antes de
+    chamar, ela é gravada em `llm_calls` com o `purpose` e o custo estimado (a reserva no
+    orçamento, ver `llm_calls`); no fim fica com o custo real, o `stop_reason` e o `request_id`.
+    `on_llm_call` roda quando a chamada ao Claude foi ou pode ter sido paga (com sucesso ou
+    não), antes do commit que a registra.
     """
     if video.transcript is None:
         raise ValueError(f"vídeo {video.youtube_id} ainda não foi transcrito")
@@ -137,33 +161,53 @@ async def generate(
     has_speech = transcription.is_useful_transcript(video.transcript, video.duration_s)
     generated = video.generated_recipe is None or video.prompt_version != recipe_llm.PROMPT_VERSION
     if generated:
-        if not has_speech and len(video.description.split()) < MIN_DESCRIPTION_WORDS:
-            raise NoTranscriptError(detail="sem fala útil e descrição curta")
-        await _raise_if_llm_gave_up(session, video)
-        await quotas.ensure_llm_budget(session)
-
-        if on_stage is not None:
-            await on_stage(ImportStatus.GENERATING)
+        context = llm_context(video)
+        config = recipe_llm.default_config()
+        await _raise_if_llm_gave_up(session, video, config)
+        # LLMBudgetExceededError sai daqui, sem linha gravada.
+        pending = await llm_calls.start(
+            session,
+            video,
+            purpose=purpose,
+            config=config,
+            estimate=recipe_llm.estimate_prompt(context),
+        )
         try:
-            generation = await recipe_llm.generate_recipe(
-                recipe_llm.VideoContext(
-                    title=video.title,
-                    channel=video.channel,
-                    duration_s=video.duration_s,
-                    description=video.description,
-                    segments=video.transcript if has_speech else [],
-                    transcript_source=video.transcript_source if has_speech else None,
-                )
-            )
+            if on_stage is not None:
+                await on_stage(ImportStatus.GENERATING)
+            generation = await recipe_llm.generate_recipe(context, config=config)
         except PipelineError as exc:
             if exc.llm_usage is not None:
-                _add_llm_call(session, video, exc.llm_model, exc.llm_usage, exc.code)
-                if on_llm_call is not None:
-                    on_llm_call()
-                await session.commit()
+                llm_calls.finish(
+                    pending,
+                    model=exc.llm_model,
+                    usage=exc.llm_usage,
+                    error_code=exc.code,
+                    stop_reason=exc.llm_stop_reason,
+                    request_id=exc.llm_request_id,
+                )
+            elif exc.llm_maybe_billed:
+                llm_calls.mark_timeout(pending)
+            else:
+                await llm_calls.discard(session, pending)
+                raise
+            if on_llm_call is not None:
+                on_llm_call()
+            await session.commit()
+            raise
+        except BaseException:
+            # Cancelamento ou erro inesperado: não se sabe se a API cobrou; fica a estimativa.
+            await llm_calls.mark_interrupted(session, pending)
             raise
 
-        _add_llm_call(session, video, generation.model, generation.usage, None)
+        llm_calls.finish(
+            pending,
+            model=generation.model,
+            usage=generation.usage,
+            error_code=None,
+            stop_reason=generation.stop_reason,
+            request_id=generation.request_id,
+        )
         if on_llm_call is not None:
             on_llm_call()
         video.generated_recipe = generation.recipe.model_dump(mode="json")
@@ -209,7 +253,9 @@ async def _revalidate(session: AsyncSession, video: Video) -> None:
     await _save_metadata(session, video, meta)
 
 
-async def _raise_if_llm_gave_up(session: AsyncSession, video: Video) -> None:
+async def _raise_if_llm_gave_up(
+    session: AsyncSession, video: Video, config: recipe_llm.LLMConfig
+) -> None:
     rows = (
         await session.execute(
             select(LLMCall.error_code, func.count())
@@ -217,6 +263,14 @@ async def _raise_if_llm_gave_up(session: AsyncSession, video: Video) -> None:
                 LLMCall.video_id == video.id,
                 LLMCall.prompt_version == recipe_llm.PROMPT_VERSION,
                 LLMCall.error_code.in_(list(LLM_FAILURE_LIMITS)),
+                # O eval roda outras configurações e não diz nada sobre a produção.
+                LLMCall.purpose != LLMPurpose.EVAL,
+                # Um corte por max_tokens só se repetiria no mesmo teto: subir MAX_TOKENS libera
+                # o vídeo.
+                or_(
+                    LLMCall.error_code != ErrorCode.LLM_OUTPUT_TOO_LONG,
+                    LLMCall.max_tokens >= config.max_tokens,
+                ),
             )
             .group_by(LLMCall.error_code)
         )
@@ -240,24 +294,6 @@ def raise_if_whisper_gave_up(video: Video) -> None:
             detail=f"{video.whisper_attempts} execuções do whisper sem transcrição "
             f"(último erro: {video.whisper_error_code})"
         )
-
-
-def _add_llm_call(
-    session: AsyncSession,
-    video: Video,
-    model: str | None,
-    usage: dict[str, Any],
-    error_code: ErrorCode | None,
-) -> None:
-    session.add(
-        LLMCall(
-            video_id=video.id,
-            model=model or recipe_llm.MODEL,
-            prompt_version=recipe_llm.PROMPT_VERSION,
-            usage=usage,
-            error_code=error_code,
-        )
-    )
 
 
 def _apply_metadata(video: Video, meta: VideoMetadata) -> None:

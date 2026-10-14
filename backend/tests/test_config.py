@@ -71,6 +71,13 @@ def test_invalid_rate_limit(monkeypatch: pytest.MonkeyPatch, value: str) -> None
         Settings(_env_file=None, environment="development")
 
 
+def test_invalid_llm_cache_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_CACHE_TTL", "2h")
+
+    with pytest.raises(ValidationError, match="llm_cache_ttl"):
+        Settings(_env_file=None, environment="development")
+
+
 def test_every_setting_is_documented_in_env_example() -> None:
     env_example = Path(__file__).parents[1] / ".env.example"
     documented = set(re.findall(r"^([A-Z0-9_]+)=", env_example.read_text(), re.M))

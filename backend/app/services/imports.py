@@ -146,6 +146,8 @@ def mark_deferred(imp: Import, reason: LLMBudgetExceededError) -> None:
     imp.status = ImportStatus.DEFERRED
     imp.error_code = reason.code
     imp.error_message = reason.message
+    if imp.deferred_at is None:
+        imp.deferred_at = datetime.now(UTC)
 
 
 def mark_resumed(imp: Import) -> None:

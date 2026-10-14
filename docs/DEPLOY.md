@@ -108,6 +108,7 @@ No `.env.production`, preencha pelo menos:
 | `SMTP_*`, `EMAIL_FROM` | servidor de e-mail (sem `SMTP_HOST` a API não sobe em produção) |
 | `TURNSTILE_SECRET_KEY`, `VITE_TURNSTILE_SITE_KEY` | captcha do cadastro (recomendado num site aberto) |
 | `DAILY_LLM_BUDGET_USD` | teto diário de gasto com o Claude |
+| `EVAL_DAILY_LLM_BUDGET_USD`, `LLM_CACHE_TTL` | teto diário do eval e TTL do cache do prompt (`5m` ou `1h`); os padrões servem |
 
 O Compose define sozinho `ENVIRONMENT=production`, `DATABASE_URL`, `REDIS_URL` (com a senha),
 `TRUST_PROXY_HEADERS=true`, `LOG_FORMAT=json` e `ACCESS_LOG=true`.
@@ -244,9 +245,14 @@ dcp logs worker | grep -E '"level": "(WARNING|ERROR)"'
 
 ### Custo do Claude
 
-Cada chamada paga ao Claude fica na tabela `llm_calls` (modelo e `usage`). O orçamento diário
-(`DAILY_LLM_BUDGET_USD`, por dia UTC) é somado dali: ao atingir o teto, imports de vídeos novos
-ficam `deferred` e voltam para a fila às 00:05 UTC; cópias de vídeos já processados continuam.
+Cada chamada ao Claude fica na tabela `llm_calls`. A linha é gravada antes de chamar, como
+`llm_in_progress` e com o custo estimado (prompt + `LLM_RESERVED_OUTPUT_TOKENS` de saída): é a
+reserva no orçamento. No fim ela fica com o custo real (modelo, `usage`, `stop_reason`,
+`request_id`); sem resposta (timeout, worker derrubado no meio) fica a estimativa. O orçamento
+diário (`DAILY_LLM_BUDGET_USD`, por dia UTC) é somado dali: quando a próxima chamada não cabe no
+que sobrou, imports de vídeos novos ficam `deferred` e voltam para a fila às 00:05 UTC (ou no
+startup do worker, se sobrar folga para uma chamada); cópias de vídeos já processados continuam.
+O eval (`llm-eval`) tem teto próprio, `EVAL_DAILY_LLM_BUDGET_USD`, fora do de produção.
 
 ```bash
 dcp exec api python -m app.cli llm-spend --days 14
@@ -254,10 +260,18 @@ dcp exec api python -m app.cli llm-spend --days 14
 
 ```
 orçamento diário (DAILY_LLM_BUDGET_USD): US$ 10.00
-dia (UTC)    chamadas  falhas   gasto (US$)   % do orçamento
-2026-01-15         42       1        2.9310       29%
+orçamento do eval (EVAL_DAILY_LLM_BUDGET_USD): US$ 5.00
+dia (UTC)    chamadas  falhas  sem resposta  produção (US$)  eval (US$)  % do orçamento
+2026-01-15         42       1             0          2.9310      0.0000      29%
 ...
+total em 14 dia(s): produção US$ 18.4170, eval US$ 0.0000
 ```
+
+"sem resposta" conta as chamadas em andamento e as interrompidas (`llm_timeout`), que entram
+com o custo estimado. `llm-spend --by version` agrupa por prompt, modelo e `purpose` (custo por
+receita, thinking, acerto do cache, p95 da saída e as chamadas perdidas, `llm_in_progress` há
+horas); `llm-cache-sim` simula o cache com TTL de 5 min e de 1 h sobre as chamadas reais, para
+decidir `LLM_CACHE_TTL` (ver `docs/CUSTO.md`). Nenhum dos dois chama a API.
 
 Rotina sugerida:
 

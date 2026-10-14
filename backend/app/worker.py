@@ -43,8 +43,8 @@ from app.errors import (
     PipelineError,
     YoutubeBlockedError,
 )
-from app.models import ACTIVE_IMPORT_STATUSES, Import, ImportStatus, Video
-from app.services import imports, pipeline, quotas, transcription
+from app.models import ACTIVE_IMPORT_STATUSES, Import, ImportStatus, LLMPurpose, Video
+from app.services import imports, llm_calls, pipeline, quotas, recipe_llm, transcription
 from app.services.locks import VideoLock
 
 logger = logging.getLogger(__name__)
@@ -142,8 +142,14 @@ async def _run_import(session: AsyncSession, redis: ArqRedis, imp: Import) -> st
             await pipeline.save_transcript(session, video, transcript)
 
     assert video is not None
+    # Um import que já foi adiado volta pelo cron: a chamada dele conta como `deferred`.
+    purpose = LLMPurpose.DEFERRED if imp.deferred_at is not None else LLMPurpose.IMPORT
     video, generated = await pipeline.generate(
-        session, video, on_stage=stage, on_llm_call=lambda: imports.mark_cost_incurred(imp)
+        session,
+        video,
+        purpose=purpose,
+        on_stage=stage,
+        on_llm_call=lambda: imports.mark_cost_incurred(imp),
     )
     recipe_id = await imports.copy_recipe(session, imp.user_id, video)
     imports.mark_done(imp, recipe_id, charged=generated)
@@ -332,12 +338,15 @@ async def resume_deferred_imports(ctx: Ctx) -> str:
     """Devolve à fila os imports adiados por falta de orçamento, se o de hoje tem folga.
 
     Roda logo depois da meia-noite UTC (o orçamento zera) e no startup do worker (pega um
-    `DAILY_LLM_BUDGET_USD` aumentado). Os mais antigos primeiro; se o orçamento acabar de novo
-    no meio, os que sobrarem voltam a ficar adiados quando o worker chegar neles.
+    `DAILY_LLM_BUDGET_USD` aumentado). Só retoma se a folga cabe a menor reserva possível: com
+    menos, a reserva recusaria todos, e cada um teria consultado o YouTube de novo à toa. Os
+    mais antigos primeiro; se o orçamento acabar de novo no meio, os que sobrarem voltam a ficar
+    adiados quando o worker chegar neles.
     """
     redis: ArqRedis = ctx["redis"]
+    minimum = llm_calls.minimum_reservation_usd(recipe_llm.default_config())
     async with ctx["sessionmaker"]() as session:
-        if not await quotas.llm_budget_available(session):
+        if not await quotas.llm_budget_available(session, minimum):
             return "orçamento esgotado; nada retomado"
         deferred = await session.scalars(
             select(Import)

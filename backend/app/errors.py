@@ -16,6 +16,7 @@ class ErrorCode(StrEnum):
     LLM_REFUSED = "llm_refused"
     LLM_UNAVAILABLE = "llm_unavailable"
     LLM_INVALID_OUTPUT = "llm_invalid_output"
+    LLM_OUTPUT_TOO_LONG = "llm_output_too_long"
     LLM_ERROR = "llm_error"
     LLM_BUDGET_EXCEEDED = "llm_budget_exceeded"
     IMPORT_TIMEOUT = "import_timeout"
@@ -68,8 +69,11 @@ class PipelineError(AppError):
     """Falha do processamento de um vídeo, gravada em `Import.error_code`/`error_message`.
 
     `llm_usage` vem preenchido quando a falha aconteceu depois de uma chamada paga ao Claude (o
-    uso precisa ser contabilizado mesmo sem receita). `transient` marca as falhas que podem
-    passar sozinhas: só essas são tentadas de novo pelo worker.
+    uso precisa ser contabilizado mesmo sem receita). `llm_maybe_billed` marca a falha sem
+    `usage` em que a API pode ter cobrado (timeout ou conexão perdida depois do envio): o
+    registro fica com o custo estimado. `llm_request_id` e `llm_stop_reason` vêm da resposta,
+    quando houve uma. `transient` marca as falhas que podem passar sozinhas:
+    só essas são tentadas de novo pelo worker.
     """
 
     status_code = 422
@@ -82,10 +86,16 @@ class PipelineError(AppError):
         detail: str | None = None,
         llm_model: str | None = None,
         llm_usage: dict[str, Any] | None = None,
+        llm_maybe_billed: bool = False,
+        llm_request_id: str | None = None,
+        llm_stop_reason: str | None = None,
     ) -> None:
         super().__init__(message, detail=detail)
         self.llm_model = llm_model
         self.llm_usage = llm_usage
+        self.llm_maybe_billed = llm_maybe_billed
+        self.llm_request_id = llm_request_id
+        self.llm_stop_reason = llm_stop_reason
 
 
 class InvalidUrlError(PipelineError):
@@ -182,6 +192,16 @@ class LLMUnavailableError(PipelineError):
 class LLMInvalidOutputError(PipelineError):
     code = ErrorCode.LLM_INVALID_OUTPUT
     default_message = "Não conseguimos montar a receita desse vídeo. Tente de novo mais tarde."
+
+
+class LLMOutputTooLongError(PipelineError):
+    """A resposta passou de `max_tokens`: repetir com o mesmo teto daria o mesmo corte."""
+
+    code = ErrorCode.LLM_OUTPUT_TOO_LONG
+    default_message = (
+        "A receita desse vídeo ficou longa demais para ser escrita de uma vez. "
+        "Tente um vídeo com menos receitas."
+    )
 
 
 class LLMError(PipelineError):

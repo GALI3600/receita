@@ -198,10 +198,16 @@ faster-whisper local (`WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE` 
 é baixado do Hugging Face no primeiro uso). Vídeos com mais de `MAX_VIDEO_DURATION_MIN` minutos são
 recusados.
 
-Cada chamada paga ao Claude, com sucesso ou não, é gravada em `llm_calls` (modelo, `usage`, código
-de erro): é a base do custo diário. `uv run python -m app.cli llm-spend --days 14` mostra o gasto
-por dia UTC (chamadas, falhas, US$ e % de `DAILY_LLM_BUDGET_USD`). Uma recusa, ou duas saídas inválidas, para o mesmo vídeo fazem
-o pipeline parar de chamar o Claude para ele até `PROMPT_VERSION` mudar.
+Cada chamada ao Claude é gravada em `llm_calls` antes de chamar, com o custo estimado (a reserva no
+orçamento do dia), e completada no fim (modelo, `usage`, custo, código de erro, `stop_reason`,
+`request_id`): é a base do custo diário. `uv run python -m app.cli llm-spend --days 14` mostra o gasto
+por dia UTC (chamadas, falhas, US$ e % de `DAILY_LLM_BUDGET_USD`); `--by version` agrupa por prompt,
+modelo e `purpose` (custo por receita, thinking, acerto do cache, p95 da saída), e `llm-cache-sim`
+simula o cache com TTL de 5 min e de 1 h sobre as chamadas reais. `llm-eval` roda uma configuração
+do Claude sobre `backend/evals/ids.txt` (só com `--yes`; orçamento próprio, `EVAL_DAILY_LLM_BUDGET_USD`)
+e nunca escreve em `Video` (ver `docs/CUSTO.md` § 7). Uma recusa, duas saídas inválidas
+ou uma saída cortada por `max_tokens` (no mesmo teto) para o mesmo vídeo fazem o pipeline parar de
+chamar o Claude para ele até `PROMPT_VERSION` mudar.
 
 ## Checagens
 

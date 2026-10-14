@@ -4,7 +4,7 @@ Este plano mostra como reduzir o custo de cada receita gerada sem perder qualida
 
 **Resumo**
 - **Custo medido:** cerca de US$ 0,086 por receita no prompt `2026-10-14.2`. A saída é **70%** da conta, e o thinking sozinho é 23%.
-- **Corrigir a contabilidade antes de tudo** (§ 3). O `quotas.py` não aplica o desconto de batch, não tem preço para Sonnet nem para Haiku e cobra pouco por modelos fora da tabela. Sem essa correção, nenhuma das mudanças abaixo pode ser medida.
+- **Corrigir a contabilidade antes de tudo** (§ 3; feito na fase 0). O `quotas.py` não aplica o desconto de batch, não tem preço para Sonnet nem para Haiku e cobra pouco por modelos fora da tabela. Sem essa correção, nenhuma das mudanças abaixo pode ser medida.
 - **Maiores tetos de economia:**
   - **Modelo:** o Haiku 5.5 sai ~97% mais barato e o Sonnet 5.5, ~50%. As duas trocas precisam de eval. O Haiku 5.5 não tem fallback no servidor (§ 5.6).
   - **Batch:** 50% de desconto em evals, imports adiados e backfill depois de um bump de prompt. É grátis.
@@ -109,6 +109,11 @@ A receita canônica é copiada sem chamada nova (`find_ready_video`, `complete_f
 | 6 | Falta o multiplicador de 1,1× para `inference_geo == "us"` [P]. | Sem efeito hoje, porque o valor é `global`. | Aplicar o multiplicador por precaução. |
 | 7 | Toda tentativa recusada é cobrada, mas só as categorias `bio`, `frontier_llm` e `reasoning_extraction` são faturadas [RF]. | Cobra a mais, do lado seguro. As `iterations` não trazem a categoria. | Documentar. Não há como corrigir. |
 
+**Fase 0 (feito):** itens 1 a 6 corrigidos (preços por modelo com a faixa >100k do Haiku 5.5, batch e geo "us", reserva com `llm_in_progress`/`llm_timeout`, `purpose` com `EVAL_DAILY_LLM_BUDGET_USD`); item 7 documentado no `quotas.llm_cost_usd`. Desvios do que a tabela propõe:
+- item 3: sem `request_id` (um timeout não traz resposta) e sem streaming; a chamada interrompida fica com o custo estimado;
+- item 4: estimativa local (caracteres ÷ 1,4) e saída reservada de 12k (`LLM_RESERVED_OUTPUT_TOKENS`), não `count_tokens` + saída média: sem chamada de rede antes do import, determinística, e a cauda da saída (10.138 tokens no OWLnnv4tsFQ) passaria da média;
+- item 5: orçamento separado, mas sem chave ou workspace separado. Isso continua pendente, junto com o limite de gasto no Console (aprovação 2 do § 9, passo manual).
+
 **Barreiras de custo que já existem** (`config.py:71–87`): `daily_import_limit` = 10 receitas novas por usuário por dia; `daily_failed_import_limit` = 20; `rate_limit_imports` = 30/h; `DAILY_LLM_BUDGET_USD` = 10; vídeo de no máximo 60 min. Duas lacunas:
 - falta um **limite de gasto do workspace no Console**, como última barreira;
 - o eval pela CLI passa por fora dos limites por usuário. Por isso ele precisa de orçamento próprio e da confirmação `--yes` (§ 7).
@@ -148,7 +153,7 @@ Cada mudança vira **um diff próprio** e é medida contra a última configuraç
 
 A recomendação padrão é deixar o cache sempre ligado. Este plano só se afasta disso se o § 2.3 se confirmar em produção. Como a saída não muda, o risco é só de custo.
 
-- **Fase 0:** gravar `started_at` em `llm_calls` e simular o TTL (5 min e 1 h) sobre o tráfego real. Manter o "5 min sempre" e trocar a constante por um config `LLM_CACHE_TTL = "5m" | "1h"`.
+- **Fase 0:** gravar `started_at` em `llm_calls` e simular o TTL (5 min e 1 h) sobre o tráfego real. Manter o "5 min sempre" e trocar a constante por um config `LLM_CACHE_TTL = "5m" | "1h"`. Feito: `started_at`, `LLM_CACHE_TTL` e `python -m app.cli llm-cache-sim` existem.
 - **Decidir com os dados do TTL walk:**
   - acerto de 1 h ≥ ~51% (≈ 11–12 ou mais imports/dia espalhados) → **1 h sempre** (de −12% a −19% contra hoje, com 20 a 50 por dia);
   - volume baixo → desligar o marcador ou passar a marcar por demanda. O ganho absoluto é pequeno: ≤ US$ 0,006 por chamada fria, menos de US$ 2/mês com 1 a 10 imports/dia. Só vale se o desenho abaixo for barato de manter.
@@ -181,6 +186,8 @@ A duplicação na transcrição foi descartada: são 22 palavras sobrepostas em 
 |---|---|---|---|---|
 | 3a | Schema enxuto: (1) remover `Step.order`, que o `normalize_recipe` já renumera (≈ 66 tokens por receita, 1,5%); (2) içar `group` (ingredientes como `[{group, items}]`); (3) parar de emitir campos nulos e vazios | ~5–8% juntos, a confirmar | *precisa de eval* | Os ~4,7% do (2) podem já incluir o `order`. Medir (2) sozinho com `count_tokens`, sobre as 17 saídas reserializadas, antes de somar. As chaves e a estrutura são 32% da saída visível. **Riscos do (3):** cada campo opcional dobra parte da gramática; o limite é de 24 opcionais e de 16 tipos união (`X \| None`) por requisição [SO]; e propriedades obrigatórias saem antes das opcionais [SO], então tornar `quantity`, `unit`, `group` ou `video_timestamp_s` opcionais muda a ordem em que o modelo escreve. Aplicar (1) e (2) primeiro, e (3) só se ainda valer. Trocar o schema invalida o cache e paga uma compilação única da gramática [SO]. |
 | 3b | `max_tokens` de 16000 para **20000** e **nenhum retry no mesmo teto** depois de `stop_reason: max_tokens` (subir o teto ou usar streaming) | 0% por token; evita falhas pagas | *proposta* | A maior saída já usou 63% do teto. Hoje, um corte vira `LLM_INVALID_OUTPUT` pago, e há 2 tentativas no mesmo teto. Só os tokens gerados são cobrados. Acima de ~21k, o SDK exige streaming ou `timeout` explícito. Rechecar p95/teto por modelo depois do eval: com o Sonnet em `high`, a saída pode crescer. |
+
+**3b feito na fase 0:** `MAX_TOKENS=20000`, `llm_output_too_long` sem nova tentativa no mesmo teto; streaming só acima de 21.333.
 
 O thinking (22,6%) só se controla pelo effort (5.5): no Opus 5.5, `thinking: disabled` retorna 400 [E].
 
@@ -294,6 +301,8 @@ Os tokens medidos foram re-precificados pelas tabelas [P]. É só uma indicaçã
 
 É pré-requisito de toda troca: nenhuma vai para produção sem ele.
 
+**Fase 0 (feito):** runner em `python -m app.cli llm-eval` (sem `--batch`, que é da fase 1), conjunto em `backend/evals/ids.txt`; `--from-db` avalia as receitas gravadas sem chamar o Claude (a linha de base da 14.2). A rubrica continua fora do runner.
+
 - **`LLMConfig(model, effort, max_tokens, fallbacks, cache_ttl)`** congelado, com os padrões de produção. `generate_recipe(video, *, client=None, config=DEFAULT)` monta a requisição a partir dele.
 - **CLI:** `python -m app.cli llm-eval --ids FILE --model M --effort E [--max-tokens N] [--no-fallbacks] [--batch] [--repeat K] --out DIR`
   - Lê as linhas de `Video` congeladas, sem yt-dlp nem whisper, então a entrada é idêntica byte a byte entre as células.
@@ -329,6 +338,8 @@ Os tokens medidos foram re-precificados pelas tabelas [P]. É só uma indicaçã
 
 ## 8. Monitoramento
 
+**Fase 0 (feito):** colunas criadas; `llm-spend --by version`.
+
 **Colunas novas em `llm_calls`:** `started_at`, `latency_ms`, `purpose` (`import`/`deferred`/`backfill`/`eval`/`cli`), `batch_id`, `effort`, `max_tokens`, `stop_reason`, `request_id`, `cache_marker` e `cost_usd` (custo calculado na hora da gravação, incluindo as `iterations` de fallback).
 
 | Métrica (por `prompt_version` × `model` × `purpose`) | Para quê |
@@ -361,7 +372,7 @@ Os tokens medidos foram re-precificados pelas tabelas [P]. É só uma indicaçã
 
 | Fase | O quê | Custo de geração (batch) |
 |---|---|---|
-| 0 | Correções do § 3 e barreiras de custo; colunas e `purpose` (§ 8); eval runner (§ 7); `started_at` + simulação do TTL, mantendo "5 min sempre" (5.1); 3b | US$ 0 (`count_tokens` é grátis) |
+| 0 | **Entregue.** Correções do § 3 e barreiras de custo; colunas e `purpose` (§ 8); eval runner (§ 7); `started_at` + simulação do TTL, mantendo "5 min sempre" (5.1); 3b | US$ 0 (`count_tokens` é grátis) |
 | 1 | Batch para evals e adiados (4a, 4b); desenho do 4c | US$ 0 de eval; validado só por custo |
 | 2 | Nota de rubrica da 14.2 e ruído do juiz; matriz modelo × effort com 17 vídeos | **≈ US$ 6** (≈ US$ 12 síncrono) |
 | 3 | Só se o modelo vencedor ainda for o Opus: 2a, 3a e 2c, com 2 trials cada | ≤ US$ 4,4 |

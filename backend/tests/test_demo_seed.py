@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import cli
 from app.config import Settings
-from app.models import Recipe, Video
+from app.models import LLMPurpose, Recipe, Video
 from app.schemas.recipe_llm import RecipeLLM
 from app.services import demo, pipeline, recipe_llm
 from app.services.imports import existing_recipe_id, is_ready
@@ -106,7 +106,7 @@ async def test_demo_video_is_generated_for_real_for_other_users(
     video.transcript = SPEECH  # o import de outra pessoa transcreve o vídeo antes de gerar
     await session.commit()
 
-    video, was_generated = await pipeline.generate(session, video)
+    video, was_generated = await pipeline.generate(session, video, purpose=LLMPurpose.CLI)
 
     assert was_generated
     assert video.generated_recipe is not None
