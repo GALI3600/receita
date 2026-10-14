@@ -248,6 +248,19 @@ async def test_get_import_in_whisper_queue_shows_position(
     assert response.json()["queue_position"] == 2
 
 
+async def test_queue_position_with_jobs_enqueued_in_the_same_millisecond(redis: ArqRedis) -> None:
+    # "whisper:aaa..." vem antes de "whisper:zzz..." na ordem alfabética; com o mesmo score o
+    # ZRANK colocaria o job enfileirado depois na frente.
+    await redis.zadd(queue.WHISPER_QUEUE, {queue.whisper_job_id("zzzzzzzzzzz"): 1000})
+    await redis.zadd(queue.WHISPER_QUEUE, {queue.whisper_job_id("aaaaaaaaaaa"): 1000})
+
+    position = await queue.queue_position(
+        redis, queue.WHISPER_QUEUE, queue.whisper_job_id("aaaaaaaaaaa")
+    )
+
+    assert position == 2
+
+
 async def test_import_of_another_user_is_not_found(
     client: AsyncClient, session: AsyncSession
 ) -> None:

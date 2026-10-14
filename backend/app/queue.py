@@ -124,8 +124,12 @@ async def queue_position(redis: ArqRedis, queue_name: str, job_id: str) -> int |
     """Posição aproximada (1 = próximo) do job na fila; None se já está rodando ou não existe.
 
     Os jobs em execução continuam no sorted set do arq até terminarem, então entram na conta.
+    Conta os jobs com score (horário em ms) até o deste, em vez de ZRANK: jobs enfileirados no
+    mesmo milissegundo empatam e o ZRANK os desempataria pela ordem alfabética do id.
     """
     if await redis.exists(in_progress_key_prefix + job_id):
         return None
-    rank = await redis.zrank(queue_name, job_id)
-    return None if rank is None else rank + 1
+    score = await redis.zscore(queue_name, job_id)
+    if score is None:
+        return None
+    return await redis.zcount(queue_name, "-inf", score)
