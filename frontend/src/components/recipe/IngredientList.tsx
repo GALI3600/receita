@@ -2,7 +2,7 @@ import { useId, useRef } from 'react'
 
 import type { Ingredient } from '../../api/types'
 import { ingredientKey, useCheckedIngredients } from '../../lib/checkedIngredients'
-import { groupIngredients, ingredientAmount } from '../../lib/format'
+import { groupIngredients, ingredientAmount, ingredientNote } from '../../lib/format'
 import { scaleIngredient } from '../../lib/quantity'
 
 interface IngredientListProps {
@@ -58,6 +58,7 @@ export function IngredientList({ recipeId, ingredients, factor = 1 }: Ingredient
                   const inputId = `${baseId}-item-${index}`
                   const shown = scaleIngredient(ingredient, factor)
                   const amount = ingredientAmount(shown)
+                  const note = ingredientNote(shown, { scaled: factor !== 1 })
                   const isChecked = checked.has(key)
                   return (
                     <li key={index} className="print:break-inside-avoid">
@@ -81,15 +82,8 @@ export function IngredientList({ recipeId, ingredients, factor = 1 }: Ingredient
                             </>
                           )}
                           <span>{ingredient.name}</span>
-                          {ingredient.note && (
-                            <span className="text-ink-soft">, {ingredient.note}</span>
-                          )}
-                          {!amount && (
-                            <>
-                              {' '}
-                              <span className="text-ink-soft">(a gosto)</span>
-                            </>
-                          )}
+                          {/* Sem quantidade, o motivo ("a gosto", "para fritar") vem na nota. */}
+                          {note && <span className="text-ink-soft">, {note}</span>}
                         </span>
                       </label>
                     </li>

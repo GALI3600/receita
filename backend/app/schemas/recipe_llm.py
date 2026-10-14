@@ -6,13 +6,20 @@ Difficulty = Literal["fácil", "média", "difícil"]
 
 
 class Ingredient(BaseModel):
-    name: str = Field(description='Nome do ingrediente, em minúsculas. Ex.: "farinha de trigo".')
-    quantity: str | None = Field(
-        description='Quantidade como aparece no vídeo ("2", "1/2", "200"). null se não foi dita.'
+    name: str = Field(
+        description="Nome do ingrediente, em minúsculas, sem quantidade nem tamanho. "
+        'Ex.: "farinha de trigo".'
     )
-    unit: str | None = Field(description='Unidade ("xícara", "g", "colher de sopa") ou null.')
+    quantity: str | None = Field(
+        description='Quantidade do vídeo ou da descrição ("2", "1/2", "200"). null se não foi dita.'
+    )
+    unit: str | None = Field(
+        description='Só a unidade ("xícara", "g", "colher de sopa", "dentes") ou null.'
+    )
     note: str | None = Field(
-        description='Observação de preparo ou estado ("peneirada", "em temperatura ambiente").'
+        description='Estado, corte, tamanho ou equivalência, sem parênteses ("peneirada", '
+        '"grandes", "≈ 1 xícara"). Com quantity null, diz o que fazer ("a gosto", "para fritar", '
+        '"quantidade não informada").'
     )
     group: str | None = Field(
         description='Parte da receita a que pertence ("massa", "recheio", "cobertura") ou null.'
@@ -23,7 +30,7 @@ class Step(BaseModel):
     order: int = Field(description="Posição do passo, começando em 1.")
     text: str = Field(description="Instrução do passo, no imperativo e em português.")
     video_timestamp_s: int | None = Field(
-        description="Segundo do vídeo em que o passo começa a ser mostrado, ou null."
+        description="Segundo do vídeo em que o passo começa a ser feito, ou null."
     )
 
 
@@ -36,6 +43,8 @@ class RecipeLLM(BaseModel):
     cook_time_min: int | None = Field(description="Tempo de forno/fogo, em minutos, ou null.")
     difficulty: Difficulty | None
     ingredients: list[Ingredient]
-    steps: list[Step]
-    tips: list[str] = Field(description="Dicas do vídeo e dúvidas sobre quantidades não ditas.")
+    steps: list[Step] = Field(description="Pelo menos um passo quando is_recipe é true.")
+    tips: list[str] = Field(
+        description="Conselhos práticos do vídeo para quem cozinha; não fala das fontes."
+    )
     tags: list[str] = Field(description='Tags curtas em minúsculas ("sobremesa", "vegano").')

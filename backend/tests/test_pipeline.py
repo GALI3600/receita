@@ -23,6 +23,7 @@ from app.services import pipeline, recipe_llm, transcription, youtube
 from app.services.recipe_llm import PROMPT_VERSION, RecipeGeneration, VideoContext
 from app.services.transcription import Transcript
 from app.services.youtube import VideoMetadata
+from tests.test_recipe_llm import USAGE, FakeAPI, _message, _ok
 
 YOUTUBE_ID = "abcdefghijk"
 URL = f"https://youtu.be/{YOUTUBE_ID}?si=abc"
@@ -57,6 +58,9 @@ RECIPE = RecipeLLM(
     tags=["bolo"],
 )
 LLM_USAGE = {"input_tokens": 100, "output_tokens": 50}
+
+# A função de verdade, guardada antes de a fixture `fake` trocá-la.
+REAL_GENERATE_RECIPE = recipe_llm.generate_recipe
 
 
 @dataclass
@@ -334,6 +338,54 @@ async def test_process_video_not_a_recipe_without_speech_reports_no_transcript(
 
     with pytest.raises(NoTranscriptError):
         await pipeline.process_video(URL, session)
+
+
+async def test_process_video_ingredients_without_method_or_speech_is_cached(
+    session: AsyncSession, fake: FakeServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Vídeo só com música (o whisper ouviu "You") e descrição só com ingredientes: o Claude
+    # devolve is_recipe=true sem passos. A mesma entrada daria a mesma resposta, então o vídeo
+    # fica com uma não receita do prompt atual e o erro não convida a tentar de novo.
+    fake.transcript = Transcript(
+        [Segment(start=0.0, end=2.0, text="You")], TranscriptSource.WHISPER
+    )
+    fake.meta = replace(
+        META,
+        description="Ingredientes: 1 kg de carne, 1 kg de arroz, 2 colheres de pilau masala, "
+        "3 cebolas, 4 dentes de alho, 2 tomates, sal e óleo.",
+    )
+    only_ingredients = RecipeLLM.model_validate(
+        RECIPE.model_dump()
+        | {
+            "steps": [],
+            "ingredients": [
+                {"name": "carne", "quantity": "1", "unit": "kg", "note": None, "group": None}
+            ],
+        }
+    )
+    api = FakeAPI(
+        _ok(_message(content=[{"type": "text", "text": only_ingredients.model_dump_json()}]))
+    )
+    monkeypatch.setattr(recipe_llm, "generate_recipe", REAL_GENERATE_RECIPE)
+    monkeypatch.setattr(recipe_llm, "get_client", api.client)
+
+    with pytest.raises(NoTranscriptError) as exc_info:
+        await pipeline.process_video(URL, session)
+    assert exc_info.value.code == "no_transcript"
+    assert exc_info.value.llm_usage is None  # a chamada paga foi registrada como sucesso
+
+    with pytest.raises(NoTranscriptError):
+        await pipeline.process_video(URL, session)
+
+    assert len(api.requests) == 1
+    video = await session.scalar(select(Video))
+    assert video is not None
+    assert video.prompt_version == PROMPT_VERSION
+    assert video.generated_recipe is not None
+    assert video.generated_recipe["is_recipe"] is False
+    assert video.generated_recipe["summary"] == recipe_llm.NO_METHOD_SUMMARY
+    calls = (await session.scalars(select(LLMCall))).all()
+    assert [(c.error_code, c.usage) for c in calls] == [(None, USAGE)]
 
 
 async def test_process_video_llm_error_keeps_transcript(

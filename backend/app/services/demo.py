@@ -2,8 +2,12 @@
 
 `python -m app.cli seed-demo --email <email>` grava alguns vídeos reais do YouTube (públicos e
 incorporáveis) com uma receita já gerada e coloca as receitas no livro do usuário. Só roda com
-ENVIRONMENT=development: os vídeos ficam com o `PROMPT_VERSION` atual, então outros usuários que
-importarem os mesmos links recebem estas receitas como se tivessem vindo do Claude.
+ENVIRONMENT=development.
+
+Os vídeos ficam com `prompt_version` "demo", que nunca é o `PROMPT_VERSION` atual: para o
+pipeline eles ainda não têm receita, então quem importar os mesmos links recebe uma receita
+gerada de verdade pelo Claude (que substitui a de demonstração no vídeo). A cópia no livro de
+quem rodou o seed não depende da versão e continua valendo.
 """
 
 import uuid
@@ -15,10 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import User, Video
-from app.services import recipe_llm
 from app.services.imports import copy_recipe
 
 DEMO_LLM_MODEL = "demo"
+DEMO_PROMPT_VERSION = "demo"
 
 
 class DemoSeedError(Exception):
@@ -265,7 +269,7 @@ async def _upsert_video(session: AsyncSession, demo: DemoVideo) -> Video:
     video.generated_recipe = demo.recipe
     video.llm_model = DEMO_LLM_MODEL
     video.llm_usage = None
-    video.prompt_version = recipe_llm.PROMPT_VERSION
+    video.prompt_version = DEMO_PROMPT_VERSION
     await session.flush()
     return video
 

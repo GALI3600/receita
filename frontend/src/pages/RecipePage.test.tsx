@@ -50,7 +50,7 @@ describe('RecipePage', () => {
     const calda = screen.getByRole('region', { name: 'calda' })
     expect(within(massa).getAllByRole('checkbox')).toHaveLength(3)
     expect(within(calda).getByLabelText(/chocolate em pó/)).toBeInTheDocument()
-    expect(within(massa).getByLabelText(/sal \(a gosto\)/)).toBeInTheDocument()
+    expect(within(massa).getByRole('checkbox', { name: 'sal, a gosto' })).toBeInTheDocument()
 
     const farinha = within(massa).getByRole('checkbox', { name: /farinha de trigo/ })
     await userEvent.click(farinha)
@@ -161,6 +161,37 @@ describe('RecipePage', () => {
 
     const group = await screen.findByRole('region', { name: 'para enrolar' })
     expect(within(group).getByRole('checkbox', { name: /nibs de cacau/ })).toBeInTheDocument()
+  })
+
+  it('ingrediente sem quantidade mostra só o nome e a nota, sem "(a gosto)" inventado', async () => {
+    const ingredient = { quantity: null, unit: null, note: null, group: null }
+    mockApi({
+      'GET /api/auth/me': () => json(200, makeMe()),
+      'GET /api/recipes/rec-1': () =>
+        json(
+          200,
+          makeRecipe({
+            ingredients: [
+              { ...ingredient, name: 'óleo', note: 'para fritar' },
+              { ...ingredient, name: 'cebolinha' },
+              // Receitas antigas: unidade sem quantidade e nota entre parênteses.
+              { ...ingredient, name: 'queijo', unit: 'fatias' },
+              { ...ingredient, name: 'leite', quantity: '1', unit: 'copo', note: '(300 ml)' },
+            ],
+          }),
+        ),
+    })
+    renderRecipe()
+
+    const oleo = await screen.findByRole('checkbox', { name: 'óleo, para fritar' })
+    expect(oleo).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'cebolinha' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'queijo, fatias' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: '1 copo leite, 300 ml' })).toBeInTheDocument()
+    const list = screen.getByRole('region', { name: 'Ingredientes' })
+    expect(list).not.toHaveTextContent('a gosto')
+    // Só a quantidade vai em negrito: "fatias" sozinha não é medida.
+    expect([...list.querySelectorAll('.amount')].map((el) => el.textContent)).toEqual(['1 copo'])
   })
 
   it('vídeo indisponível: os tempos dos passos viram texto, sem botões inúteis', async () => {

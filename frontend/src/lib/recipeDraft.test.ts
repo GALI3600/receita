@@ -86,7 +86,7 @@ describe('validateDraft', () => {
       name: 'sal',
       quantity: null,
       unit: null,
-      note: null,
+      note: 'a gosto',
       group: 'massa',
     })
     expect(payload?.body.steps).toEqual([

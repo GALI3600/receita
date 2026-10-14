@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from typing import Any
 
 import anthropic
@@ -239,7 +240,36 @@ async def test_generate_recipe_recipe_without_steps_is_invalid() -> None:
 
     with pytest.raises(LLMInvalidOutputError) as exc_info:
         await generate_recipe(VIDEO, client=api.client())
+    assert exc_info.value.detail == "is_recipe=true sem nenhum passo"
     assert exc_info.value.llm_usage == USAGE
+
+
+async def test_generate_recipe_without_steps_or_speech_becomes_not_a_recipe() -> None:
+    # Só a lista de ingredientes na descrição (vídeo só com música): a mesma entrada daria a
+    # mesma resposta, então o resultado é uma não receita estável, e não um erro.
+    no_speech = replace(VIDEO, segments=[], transcript_source=None)
+    only_ingredients = {**RECIPE, "steps": []}
+    api = FakeAPI(_ok(_message(content=[{"type": "text", "text": json.dumps(only_ingredients)}])))
+
+    result = await generate_recipe(no_speech, client=api.client())
+
+    recipe = result.recipe
+    assert recipe.is_recipe is False
+    assert recipe.title == RECIPE["title"]
+    assert recipe.summary == recipe_llm.NO_METHOD_SUMMARY
+    assert (recipe.ingredients, recipe.steps, recipe.tips, recipe.tags) == ([], [], [], [])
+    assert (recipe.servings, recipe.prep_time_min, recipe.cook_time_min) == (None, None, None)
+    assert recipe.difficulty is None
+    assert result.prompt_version == PROMPT_VERSION
+    assert result.usage == USAGE
+
+
+def test_schema_descriptions_agree_with_the_prompt() -> None:
+    # As descrições dos campos vão para o modelo junto com o schema (output_format).
+    fields = recipe_llm.RecipeLLM.model_json_schema()["properties"]
+    assert "dúvida" not in fields["tips"]["description"]
+    assert "fontes" in fields["tips"]["description"]
+    assert "Pelo menos um passo" in fields["steps"]["description"]
 
 
 async def test_generate_recipe_unpaid_errors_have_no_usage() -> None:
@@ -304,8 +334,8 @@ def test_build_user_message_formats_transcript_and_data_block() -> None:
 
     assert message.startswith("<video>\n<titulo>Bolo de cenoura | Rita Lobo</titulo>")
     assert "<duracao_segundos>533</duracao_segundos>" in message
-    assert '<transcricao fonte="auto">\n[00:04] o preparo do bolo começa\n' in message
-    assert "[01:05] bata as cenouras com os ovos\n</transcricao>" in message
+    assert '<transcricao fonte="auto">\n[4s] o preparo do bolo começa\n' in message
+    assert "[65s] bata as cenouras com os ovos\n</transcricao>" in message
     assert "Ingredientes: 3 cenouras" in message
     assert message.rstrip().endswith("Escreva a receita deste vídeo seguindo as instruções.")
 
@@ -417,6 +447,26 @@ def test_normalize_recipe_bounds_fields_to_recipe_columns() -> None:
     assert all(len(tag) <= recipe_llm.MAX_TAG_CHARS for tag in recipe.tags)
 
 
+def test_normalize_recipe_drops_blank_steps_and_ingredients() -> None:
+    # 88syMwVL0dk (prompt 2026-10-14.2): o modelo devolveu um sexto passo com texto vazio.
+    recipe = recipe_llm.RecipeLLM.model_validate(
+        {
+            **RECIPE,
+            "ingredients": [*RECIPE["ingredients"], {**RECIPE["ingredients"][0], "name": "  "}],
+            "steps": [
+                {"order": 1, "text": "Misture.", "video_timestamp_s": 10},
+                {"order": 2, "text": " ", "video_timestamp_s": None},
+                {"order": 3, "text": "Asse.", "video_timestamp_s": 20},
+            ],
+        }
+    )
+
+    normalized = recipe_llm.normalize_recipe(recipe, duration_s=533)
+
+    assert [(s.order, s.text) for s in normalized.steps] == [(1, "Misture."), (2, "Asse.")]
+    assert len(normalized.ingredients) == len(RECIPE["ingredients"])
+
+
 def test_normalize_recipe_keeps_valid_values() -> None:
     recipe = recipe_llm.RecipeLLM.model_validate(RECIPE)
     normalized = recipe_llm.normalize_recipe(recipe, duration_s=533)
@@ -425,3 +475,70 @@ def test_normalize_recipe_keeps_valid_values() -> None:
     assert normalized.servings == "12 fatias"
     assert (normalized.prep_time_min, normalized.cook_time_min) == (15, 40)
     assert normalized.ingredients == recipe.ingredients
+
+
+def _ingredient(**fields: str | None) -> recipe_llm.Ingredient:
+    base: dict[str, str | None] = {
+        "name": "farinha",
+        "quantity": None,
+        "unit": None,
+        "note": None,
+        "group": None,
+    }
+    return recipe_llm.Ingredient.model_validate(base | fields)
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        # Parênteses em volta da observação inteira saem; os de dentro do texto ficam.
+        ({"quantity": "2", "unit": "xícaras", "note": " (1⅓ xícara) "}, ("xícaras", "1⅓ xícara")),
+        ({"quantity": "1", "note": "(a) e (b)"}, (None, "(a) e (b)")),
+        ({"quantity": "1", "note": "peneirada (opcional)"}, (None, "peneirada (opcional)")),
+        ({"quantity": "1", "note": "()"}, (None, None)),
+        ({"note": "(a gosto)"}, (None, "a gosto")),
+        (
+            {"quantity": "1", "note": "(cerca de 1 xícara (240 ml))"},
+            (None, "cerca de 1 xícara (240 ml)"),
+        ),
+        ({"quantity": "1", "note": "((240 ml)"}, (None, "((240 ml)")),
+        # Observação igual ao grupo só repete o título da seção.
+        ({"note": "Para servir", "group": "para servir"}, (None, None)),
+        ({"note": "a gosto", "group": "calda"}, (None, "a gosto")),
+        # Unidade sem quantidade apareceria como se fosse a medida.
+        ({"unit": "fatias"}, (None, "fatias")),
+        ({"unit": "fatias", "note": "(finas)"}, (None, "fatias, finas")),
+        ({"unit": "  "}, (None, None)),
+        ({"quantity": "3", "unit": "dentes", "note": "grandes"}, ("dentes", "grandes")),
+        # "quantidade não informada" só fica quando é tudo o que a observação diz.
+        ({"note": "quantidade não informada"}, (None, "quantidade não informada")),
+        ({"note": "bastante, quantidade não informada"}, (None, "bastante")),
+        ({"note": "Quantidade não informada, picada"}, (None, "picada")),
+        # Vírgula decimal não é separador.
+        ({"quantity": "1", "note": "pacote de 1,5 kg"}, (None, "pacote de 1,5 kg")),
+    ],
+)
+def test_normalize_ingredient_cleans_unit_and_note(
+    fields: dict[str, str | None], expected: tuple[str | None, str | None]
+) -> None:
+    recipe = recipe_llm.RecipeLLM.model_validate(
+        {**RECIPE, "ingredients": [_ingredient(**fields).model_dump()]}
+    )
+
+    ingredient = recipe_llm.normalize_recipe(recipe, duration_s=533).ingredients[0]
+
+    assert (ingredient.unit, ingredient.note) == expected
+    assert ingredient.group == fields.get("group")
+
+
+def test_normalize_ingredient_clips_the_merged_note() -> None:
+    long_note = "n" * 1000
+    recipe = recipe_llm.RecipeLLM.model_validate(
+        {**RECIPE, "ingredients": [_ingredient(unit="fatias", note=long_note).model_dump()]}
+    )
+
+    ingredient = recipe_llm.normalize_recipe(recipe, duration_s=533).ingredients[0]
+
+    assert ingredient.unit is None
+    assert ingredient.note is not None and ingredient.note.startswith("fatias, nnn")
+    assert len(ingredient.note) == recipe_llm.MAX_FIELD_CHARS

@@ -13,12 +13,15 @@ import sys
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.errors import PipelineError
 from app.models import ImportStatus, Video
+from app.services import youtube
 from app.services.demo import DEMO_VIDEOS, DemoSeedError, seed_demo
-from app.services.pipeline import process_video
+from app.services.pipeline import find_video, process_video
 from app.services.quotas import llm_spend_by_day
 from app.services.recipe_llm import format_timestamp
 from app.services.transcription import word_count
@@ -41,6 +44,7 @@ def _video_as_dict(video: Video) -> dict[str, Any]:
         "title": video.title,
         "channel": video.channel,
         "duration_s": video.duration_s,
+        "description": video.description,
         "embeddable": video.embeddable,
         "transcript_source": video.transcript_source,
         "transcript": video.transcript,
@@ -70,6 +74,15 @@ def _print_summary(video: Video) -> None:
     print(f"uso: {json.dumps(video.llm_usage)}")
 
 
+async def _failure_as_dict(session: AsyncSession, url: str, exc: PipelineError) -> dict[str, Any]:
+    failure: dict[str, Any] = {"error_code": exc.code, "error_detail": exc.detail}
+    try:
+        video = await find_video(session, youtube.extract_youtube_id(url))
+    except PipelineError:
+        video = None
+    return {**failure, **(_video_as_dict(video) if video is not None else {})}
+
+
 async def _import(url: str, *, skip_llm: bool, as_json: bool) -> int:
     async def on_stage(status: ImportStatus) -> None:
         _print_stage(status)
@@ -82,6 +95,13 @@ async def _import(url: str, *, skip_llm: bool, as_json: bool) -> int:
                 print(f"erro [{exc.code}]: {exc.message}", file=sys.stderr)
                 if exc.detail:
                     print(f"  detalhe: {exc.detail}", file=sys.stderr)
+                if as_json:
+                    # O vídeo pode ter ficado salvo (ex.: receita que não é receita, em cache).
+                    print(
+                        json.dumps(
+                            await _failure_as_dict(session, url, exc), ensure_ascii=False, indent=2
+                        )
+                    )
                 return 1
     finally:
         await engine.dispose()

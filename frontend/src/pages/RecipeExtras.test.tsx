@@ -235,10 +235,13 @@ describe('escala de porções', () => {
     await userEvent.click(within(control).getByRole('button', { name: 'Mais porções' }))
     expect(within(control).getByRole('status')).toHaveTextContent('3 porções')
 
-    expect(screen.getByRole('checkbox', { name: /^3 xícaras farinha de trigo/ })).toBeVisible()
+    // A observação não é quantidade: fica como está.
+    expect(
+      screen.getByRole('checkbox', { name: '3 xícaras farinha de trigo, peneirada' }),
+    ).toBeVisible()
     expect(screen.getByRole('checkbox', { name: /^4 1\/2 cenoura/ })).toBeVisible()
     expect(screen.getByRole('checkbox', { name: /^3\/4 xícara chocolate em pó/ })).toBeVisible()
-    expect(screen.getByRole('checkbox', { name: 'sal (a gosto)' })).toBeVisible()
+    expect(screen.getByRole('checkbox', { name: 'sal, a gosto' })).toBeVisible()
 
     await userEvent.click(within(control).getByRole('button', { name: 'Menos porções' }))
     await userEvent.click(within(control).getByRole('button', { name: 'Menos porções' }))
@@ -249,6 +252,42 @@ describe('escala de porções', () => {
     await userEvent.click(within(control).getByRole('button', { name: 'Voltar para 2 porções' }))
     expect(within(control).getByRole('status')).toHaveTextContent('2 porções')
     expect(screen.getByRole('checkbox', { name: /^2 xícaras farinha de trigo/ })).toBeVisible()
+  })
+
+  it('a escala não mexe na observação nem na unidade sem quantidade, mas esconde equivalências', async () => {
+    const ingredient = { quantity: null, unit: null, note: null, group: null }
+    mockApi(
+      routes(
+        makeRecipe({
+          servings: '2 porções',
+          ingredients: [
+            { ...ingredient, name: 'leite', quantity: '1', unit: 'copo', note: 'copo de 300 ml' },
+            // Receita antiga: unidade sem quantidade.
+            { ...ingredient, name: 'queijo', unit: 'fatia', note: 'para servir' },
+            {
+              ...ingredient,
+              name: 'farinha',
+              quantity: '200',
+              unit: 'g',
+              note: 'peneirada, ≈ 1⅔ xícara',
+            },
+          ],
+        }),
+      ),
+    )
+    renderRecipe()
+    expect(
+      await screen.findByRole('checkbox', { name: '200 g farinha, peneirada, ≈ 1⅔ xícara' }),
+    ).toBeVisible()
+
+    const control = await screen.findByRole('group', { name: 'Rende' })
+    await userEvent.click(within(control).getByRole('button', { name: 'Mais porções' }))
+    await userEvent.click(within(control).getByRole('button', { name: 'Mais porções' }))
+    expect(within(control).getByRole('status')).toHaveTextContent('4 porções')
+    expect(screen.getByRole('checkbox', { name: '2 copos leite, copo de 300 ml' })).toBeVisible()
+    expect(screen.getByRole('checkbox', { name: 'queijo, fatia, para servir' })).toBeVisible()
+    // A equivalência vale para a quantidade original: sai quando a receita é escalada.
+    expect(screen.getByRole('checkbox', { name: '400 g farinha, peneirada' })).toBeVisible()
   })
 
   it('rendimento sem número não tem controle de porções', async () => {

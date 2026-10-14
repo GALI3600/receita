@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy import func, select
@@ -7,9 +9,10 @@ from app import cli
 from app.config import Settings
 from app.models import Recipe, Video
 from app.schemas.recipe_llm import RecipeLLM
-from app.services import demo, recipe_llm
-from app.services.imports import is_ready
-from tests.factories import headers, make_user, make_video
+from app.services import demo, pipeline, recipe_llm
+from app.services.imports import existing_recipe_id, is_ready
+from app.services.recipe_llm import RecipeGeneration
+from tests.factories import GENERATED, SPEECH, headers, make_user, make_video
 
 
 def test_demo_recipes_follow_the_llm_schema() -> None:
@@ -37,8 +40,10 @@ async def test_seed_demo_fills_the_users_book(client: AsyncClient, session: Asyn
     assert len(recipe_ids) == len(demo.DEMO_VIDEOS)
     videos = list(await session.scalars(select(Video)))
     assert {v.youtube_id for v in videos} == {d.youtube_id for d in demo.DEMO_VIDEOS}
-    assert all(is_ready(v) and v.embeddable for v in videos)
-    assert all(v.prompt_version == recipe_llm.PROMPT_VERSION for v in videos)
+    assert all(v.embeddable for v in videos)
+    # A receita de demonstração não conta como gerada pelo Claude com o prompt atual.
+    assert all(v.prompt_version == demo.DEMO_PROMPT_VERSION for v in videos)
+    assert not any(is_ready(v) for v in videos)
 
     response = await client.get("/recipes", headers=headers(user))
     assert response.status_code == 200
@@ -69,7 +74,46 @@ async def test_seed_demo_is_idempotent_and_updates_existing_videos(session: Asyn
     assert video is not None
     await session.refresh(video)
     assert video.title == demo.DEMO_VIDEOS[0].title
+    assert video.generated_recipe == demo.DEMO_VIDEOS[0].recipe
+    assert video.prompt_version == demo.DEMO_PROMPT_VERSION
+
+
+async def test_demo_video_is_generated_for_real_for_other_users(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = await make_user(session)
+    other = await make_user(session, "Bia")
+    owner_ids = await demo.seed_demo(session, owner.email)
+    first = demo.DEMO_VIDEOS[0]
+
+    # O dono do seed continua com a cópia; os outros não recebem a receita de demonstração.
+    assert await existing_recipe_id(session, owner.id, first.youtube_id) == owner_ids[0]
+    assert await existing_recipe_id(session, other.id, first.youtube_id) is None
+
+    generated = RecipeLLM.model_validate({**GENERATED, "title": "Bolo do Claude"})
+
+    async def fake_generate(video: recipe_llm.VideoContext, **_: Any) -> RecipeGeneration:
+        return RecipeGeneration(
+            recipe=generated,
+            model=recipe_llm.MODEL,
+            usage={"input_tokens": 10, "output_tokens": 5},
+            prompt_version=recipe_llm.PROMPT_VERSION,
+        )
+
+    monkeypatch.setattr(recipe_llm, "generate_recipe", fake_generate)
+    video = await session.scalar(select(Video).where(Video.youtube_id == first.youtube_id))
+    assert video is not None
+    video.transcript = SPEECH  # o import de outra pessoa transcreve o vídeo antes de gerar
+    await session.commit()
+
+    video, was_generated = await pipeline.generate(session, video)
+
+    assert was_generated
+    assert video.generated_recipe is not None
+    assert video.generated_recipe["title"] == "Bolo do Claude"
+    assert (video.llm_model, video.prompt_version) == (recipe_llm.MODEL, recipe_llm.PROMPT_VERSION)
     assert is_ready(video)
+    assert await existing_recipe_id(session, other.id, first.youtube_id) is not None
 
 
 async def test_seed_demo_requires_an_existing_account(session: AsyncSession) -> None:

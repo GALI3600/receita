@@ -60,7 +60,7 @@ export function makeRecipe(overrides: Partial<Recipe> = {}): Recipe {
       },
       { name: 'cenoura', quantity: '3', unit: null, note: null, group: 'massa' },
       { name: 'chocolate em pó', quantity: '1/2', unit: 'xícara', note: null, group: 'calda' },
-      { name: 'sal', quantity: null, unit: null, note: null, group: 'massa' },
+      { name: 'sal', quantity: null, unit: null, note: 'a gosto', group: 'massa' },
     ],
     steps: [
       { order: 1, text: 'Preaqueça o forno a 180 °C.', video_timestamp_s: 0 },

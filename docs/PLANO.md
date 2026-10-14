@@ -254,10 +254,15 @@ Cada receita nova custa dinheiro (Claude) e CPU (whisper). Com cadastro aberto, 
 stack de produção completo (Caddy com certificado interno, Mailpit no lugar do SMTP).
 
 **Pendências**
-- **Testar com uma `ANTHROPIC_API_KEY` real** e iterar o prompt (`PROMPT_VERSION`) com 10–15
-  vídeos variados (com e sem legenda, pt e en, curtos e longos), medindo qualidade e custo real
-  por receita (`python -m app.cli llm-spend`). Até agora a geração só foi exercitada com o
-  Claude simulado nos testes e com o seed de demonstração.
+- ~~Testar com uma `ANTHROPIC_API_KEY` real e iterar o prompt~~ (feito em 14/10/2026): 17
+  vídeos reais (legenda manual, automática e whisper; pt, en, es, it, he, ko; Short, vídeo
+  longo, marmitas, review com receita, vídeo só com música), três rodadas de prompt
+  (`2026-10-13.1` → `2026-10-14.1` → `2026-10-14.2`). Nota média de 4,1 para 4,6 em 5;
+  nenhuma quantidade inventada; dicas que falavam da fonte ("o vídeo não informa…") de 32 para
+  0; marmitas extraídas por inteiro; timestamps passados em segundos no marcador ("[398s]")
+  depois de um erro de conversão de mm:ss. Custo real médio: **US$ 0,086 por receita** (de
+  US$ 0,04 num vídeo de 2 min a ~US$ 0,20 num de marmitas com 72 ingredientes); 18–80 s por
+  receita com legenda, ~100 s com whisper.
 - Fazer o deploy de verdade: VPS, DNS, SMTP com domínio verificado, chaves do Turnstile e um
   monitor externo em `/api/health/ready`; medir o whisper `small` na CPU da VPS escolhida.
 - Cópia dos backups para fora da VPS (rclone/S3, sugerido no guia) e um teste de restauração

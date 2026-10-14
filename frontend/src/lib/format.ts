@@ -36,10 +36,49 @@ export function formatWait(seconds: number): string {
   return hours === 1 ? '1 hora' : `${hours} horas`
 }
 
-/** Quantidade e unidade de um ingrediente ("2 xícaras"), ou null para "a gosto". */
+/**
+ * Quantidade e unidade de um ingrediente ("2 xícaras"), ou null quando a quantidade não foi
+ * dita. O motivo ("a gosto", "para fritar", "quantidade não informada") vem em `note`.
+ */
 export function ingredientAmount(ingredient: Ingredient): string | null {
-  const parts = [ingredient.quantity, ingredient.unit].filter(Boolean)
-  return parts.length ? parts.join(' ') : null
+  const quantity = ingredient.quantity?.trim()
+  if (!quantity) return null
+  const unit = ingredient.unit?.trim()
+  return unit ? `${quantity} ${unit}` : quantity
+}
+
+const WRAPPED_NOTE_RE = /^\(([^()]*)\)$/
+
+/**
+ * Observação mostrada depois do nome ("peneirada", "a gosto"), ou null. Receitas salvas antes da
+ * normalização no backend podem ter a unidade sem quantidade ("fatias"), que não é medida e vira
+ * o começo da observação; a observação entre parênteses ("(1⅓ xícara)"), que perde os
+ * parênteses de fora para não aparecer como "farinha, (1⅓ xícara)"; e a observação igual ao
+ * grupo ("para servir"), que só repetiria o título da seção.
+ *
+ * Com `scaled` (porções mudadas), as equivalências ("≈ 1⅓ xícara", "≈ 7 oz") saem: elas valem
+ * para a quantidade original e não são escaladas junto. Os demais números da nota ("copo de
+ * 300 ml") são tamanhos e ficam.
+ */
+export function ingredientNote(
+  ingredient: Ingredient,
+  { scaled = false }: { scaled?: boolean } = {},
+): string | null {
+  let note = (ingredient.note ?? '').trim().replace(/^[,;]\s*/, '')
+  const wrapped = WRAPPED_NOTE_RE.exec(note)
+  if (wrapped) note = wrapped[1].trim()
+  const group = ingredient.group?.trim()
+  if (group && note.toLocaleLowerCase('pt-BR') === group.toLocaleLowerCase('pt-BR')) note = ''
+  if (scaled) {
+    // Partes separadas por "," ou ";" seguidos de espaço: "1,5 kg" não é separador.
+    note = note
+      .split(/\s*[,;]\s+/)
+      .map((part) => part.trim())
+      .filter((part) => part && !part.startsWith('≈'))
+      .join(', ')
+  }
+  const unit = ingredient.quantity?.trim() ? '' : (ingredient.unit?.trim() ?? '')
+  return [unit, note].filter(Boolean).join(', ') || null
 }
 
 /** Agrupa os ingredientes por `group`, na ordem em que os grupos aparecem. */
