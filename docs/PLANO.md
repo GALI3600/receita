@@ -263,6 +263,8 @@ stack de produção completo (Caddy com certificado interno, Mailpit no lugar do
   depois de um erro de conversão de mm:ss. Custo real médio: **US$ 0,086 por receita** (de
   US$ 0,04 num vídeo de 2 min a ~US$ 0,20 num de marmitas com 72 ingredientes); 18–80 s por
   receita com legenda, ~100 s com whisper.
+- **Otimizar o custo do Claude:** plano em [`CUSTO.md`](CUSTO.md) (contabilidade, eval runner,
+  batch, política de cache e a matriz modelo × effort, com Haiku 5.5 e Sonnet 5.5).
 - Fazer o deploy de verdade: VPS, DNS, SMTP com domínio verificado, chaves do Turnstile e um
   monitor externo em `/api/health/ready`; medir o whisper `small` na CPU da VPS escolhida.
 - Cópia dos backups para fora da VPS (rclone/S3, sugerido no guia) e um teste de restauração
