@@ -1,4 +1,4 @@
-import { useId, type InputHTMLAttributes, type ReactNode } from 'react'
+import { useId, useState, type InputHTMLAttributes, type ReactNode } from 'react'
 
 export function Spinner({ className = 'size-5' }: { className?: string }) {
   return (
@@ -66,25 +66,70 @@ type FieldProps = InputHTMLAttributes<HTMLInputElement> & {
   hint?: ReactNode
 }
 
-/** Campo com rótulo, dica e erro ligados por aria-describedby. */
-export function Field({ label, error, hint, id, className = '', ...input }: FieldProps) {
+function EyeIcon({ className = 'size-5' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M1.5 10S4.5 4 10 4s8.5 6 8.5 6-3 6-8.5 6-8.5-6-8.5-6Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <circle cx="10" cy="10" r="2.5" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  )
+}
+
+function EyeOffIcon({ className = 'size-5' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M1.5 10S4.5 4 10 4s8.5 6 8.5 6-3 6-8.5 6-8.5-6-8.5-6Z"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <circle cx="10" cy="10" r="2.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M3 3l14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+/** Campo com rótulo, dica e erro ligados por aria-describedby.
+ *  Para `type="password"`, mostra um botão de olho para alternar a visibilidade. */
+export function Field({ label, error, hint, id, className = '', type, ...input }: FieldProps) {
   const generated = useId()
   const inputId = id ?? generated
   const hintId = `${inputId}-hint`
   const errorId = `${inputId}-error`
   const describedBy = [hint ? hintId : null, error ? errorId : null].filter(Boolean).join(' ')
+  const isPassword = type === 'password'
+  const [visible, setVisible] = useState(false)
   return (
     <div className={className}>
       <label htmlFor={inputId} className="mb-1 block font-semibold text-ink">
         {label}
       </label>
-      <input
-        id={inputId}
-        className="field-input"
-        aria-invalid={error ? true : undefined}
-        aria-describedby={describedBy || undefined}
-        {...input}
-      />
+      <div className={isPassword ? 'relative' : undefined}>
+        <input
+          id={inputId}
+          type={isPassword ? (visible ? 'text' : 'password') : type}
+          className={isPassword ? 'field-input pr-10' : 'field-input'}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={describedBy || undefined}
+          {...input}
+        />
+        {isPassword && (
+          <button
+            type="button"
+            onClick={() => setVisible((value) => !value)}
+            className="absolute inset-y-0 right-2 flex items-center text-ink-soft hover:text-ink"
+            aria-label={visible ? 'Ocultar senha' : 'Mostrar senha'}
+          >
+            {visible ? <EyeOffIcon /> : <EyeIcon />}
+          </button>
+        )}
+      </div>
       {hint && (
         <p id={hintId} className="mt-1 text-sm text-ink-soft">
           {hint}
