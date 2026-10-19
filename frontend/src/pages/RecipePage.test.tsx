@@ -241,20 +241,6 @@ describe('RecipePage', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Excluir' })).toHaveFocus())
   })
 
-  it('a dificuldade é anunciada uma vez só nos dados da receita', async () => {
-    mockApi({
-      'GET /api/auth/me': () => json(200, makeMe()),
-      'GET /api/recipes/rec-1': () => json(200, makeRecipe()),
-    })
-    renderRecipe()
-
-    const term = await screen.findByText('Dificuldade', { selector: 'dt' })
-    const value = term.nextElementSibling as HTMLElement
-    expect(value.tagName).toBe('DD')
-    expect(value).toHaveTextContent(/^fácil$/)
-    expect(value).not.toHaveAttribute('aria-hidden')
-  })
-
   it('no celular, o player fica fixo no topo e escolher um passo não rola a página', async () => {
     mockApi({
       'GET /api/auth/me': () => json(200, makeMe()),

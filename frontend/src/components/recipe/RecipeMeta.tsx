@@ -1,4 +1,3 @@
-import type { Difficulty } from '../../api/types'
 import { formatMinutes, totalMinutes } from '../../lib/format'
 
 function ClockIcon() {
@@ -10,36 +9,7 @@ function ClockIcon() {
   )
 }
 
-const DIFFICULTY_DOTS: Record<Difficulty, number> = { fácil: 1, média: 2, difícil: 3 }
-
-/** `srLabel={false}` quando um rótulo visível já diz "Dificuldade" (ex.: o <dt> da receita). */
-export function DifficultyBadge({
-  difficulty,
-  srLabel = true,
-}: {
-  difficulty: Difficulty
-  srLabel?: boolean
-}) {
-  const dots = DIFFICULTY_DOTS[difficulty]
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="flex gap-0.5" aria-hidden="true">
-        {[1, 2, 3].map((n) => (
-          <span
-            key={n}
-            className={`size-1.5 rounded-full ${n <= dots ? 'bg-terracotta' : 'bg-line'}`}
-          />
-        ))}
-      </span>
-      <span>
-        {srLabel && <span className="sr-only">Dificuldade: </span>}
-        <span className="first-letter:uppercase">{difficulty}</span>
-      </span>
-    </span>
-  )
-}
-
-/** Tempo total e dificuldade numa linha (cards e cabeçalho da receita). */
+/** Tempo total (cards e cabeçalho da receita). */
 export function RecipeMeta({
   recipe,
   className = '',
@@ -47,24 +17,20 @@ export function RecipeMeta({
   recipe: {
     prep_time_min: number | null
     cook_time_min: number | null
-    difficulty: Difficulty | null
   }
   className?: string
 }) {
   const total = totalMinutes(recipe)
-  if (total === null && !recipe.difficulty) return null
+  if (total === null) return null
   return (
     <p className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-soft ${className}`}>
-      {total !== null && (
-        <span className="inline-flex items-center gap-1.5">
-          <ClockIcon />
-          <span>
-            <span className="sr-only">Tempo total: </span>
-            {formatMinutes(total)}
-          </span>
+      <span className="inline-flex items-center gap-1.5">
+        <ClockIcon />
+        <span>
+          <span className="sr-only">Tempo total: </span>
+          {formatMinutes(total)}
         </span>
-      )}
-      {recipe.difficulty && <DifficultyBadge difficulty={recipe.difficulty} />}
+      </span>
     </p>
   )
 }
