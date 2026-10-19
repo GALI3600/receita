@@ -1,0 +1,15 @@
+# Override de dev exposto publicamente (Cloudflare Tunnel -> Caddy -> receita.lan).
+#
+# - A stack roda em modo development (ENVIRONMENT da ancora *backend), com /docs e /openapi.json
+#   expostos de proposito.
+# - O proxy (Caddy) encaminha /api/* para a API removendo o prefixo (/api/auth/me -> /auth/me).
+#   O --root-path /api faz o FastAPI gerar o openapi_url (/api/openapi.json) e o campo servers
+#   corretos, para a Swagger em /api/docs achar o spec e o "Try it out" prefixar /api.
+# - A porta publicada e 8005 (o base usa 8000, ocupada pelo portainer); !override troca a lista.
+services:
+  api:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --root-path /api
+    ports: !override
+      - "8005:8000"
+    environment:
+      ENVIRONMENT: development
