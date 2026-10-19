@@ -7,8 +7,7 @@ import type { Recipe, Step } from '../api/types'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { IngredientList } from '../components/recipe/IngredientList'
 import { PersonalNotes } from '../components/recipe/PersonalNotes'
-import { RatingStars } from '../components/recipe/RatingStars'
-import { DifficultyBadge, HeartIcon } from '../components/recipe/RecipeMeta'
+import { HeartIcon } from '../components/recipe/RecipeMeta'
 import { ServingsControl } from '../components/recipe/ServingsControl'
 import { StepList } from '../components/recipe/StepList'
 import { RecipeEditor } from '../components/recipe/editor/RecipeEditor'
@@ -66,7 +65,7 @@ function TimeFacts({ recipe, showServings }: { recipe: Recipe; showServings: boo
       : null,
   ].filter((fact) => fact !== null)
 
-  if (facts.length === 0 && !recipe.difficulty) return null
+  if (facts.length === 0) return null
   return (
     <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 border-y border-line py-4 sm:flex sm:flex-wrap sm:gap-x-10">
       {facts.map((fact) => (
@@ -77,16 +76,6 @@ function TimeFacts({ recipe, showServings }: { recipe: Recipe; showServings: boo
           <dd className="font-serif text-lg">{fact.value}</dd>
         </div>
       ))}
-      {recipe.difficulty && (
-        <div>
-          <dt className="text-xs font-semibold tracking-wider text-ink-soft uppercase">
-            Dificuldade
-          </dt>
-          <dd className="font-serif text-lg">
-            <DifficultyBadge difficulty={recipe.difficulty} srLabel={false} />
-          </dd>
-        </div>
-      )}
     </dl>
   )
 }
@@ -267,7 +256,6 @@ function RecipeView({
   const favorite = useUpdateRecipe(recipe.id)
   // O coração "pula" só quando a pessoa acabou de favoritar, não toda vez que a página abre.
   const [justFavorited, setJustFavorited] = useState(false)
-  const rating = useUpdateRecipe(recipe.id)
   const scale = useServingsScale(recipe.servings)
   const justImported = (location.state as { imported?: boolean } | null)?.imported === true
   // Sem vídeo, os tempos dos passos viram texto e o player deixa de ficar fixo no celular.
@@ -295,9 +283,6 @@ function RecipeView({
 
       <div className="page-sheet recipe-sheet relative px-3 py-6 sm:px-8 sm:py-10 lg:px-12">
         <header className="max-w-3xl">
-          {recipe.tags.length > 0 && (
-            <p className="eyebrow">{recipe.tags.slice(0, 3).join(' · ')}</p>
-          )}
           <h1
             id="titulo-receita"
             tabIndex={-1}
@@ -445,11 +430,6 @@ function RecipeView({
               <h2 id="anotacoes" className="text-xl font-semibold">
                 Suas anotações
               </h2>
-              <RatingStars
-                value={recipe.rating}
-                onChange={(value) => rating.mutate({ rating: value })}
-              />
-              {rating.isError && <Alert tone="error">{describeError(rating.error)}</Alert>}
               <PersonalNotes key={recipe.id} recipe={recipe} />
             </section>
 
@@ -459,26 +439,6 @@ function RecipeView({
                   Anotações
                 </h2>
                 <p className="whitespace-pre-line">{recipe.user_notes}</p>
-              </section>
-            )}
-
-            {recipe.tags.length > 0 && (
-              <section aria-labelledby="tags" className="print:hidden">
-                <h2 id="tags" className="sr-only">
-                  Tags
-                </h2>
-                <ul className="flex flex-wrap gap-2">
-                  {recipe.tags.map((tag) => (
-                    <li key={tag}>
-                      <Link
-                        to={`/livro?tag=${encodeURIComponent(tag)}`}
-                        className="tag-chip tag-chip-action hover:border-terracotta/50 hover:text-terracotta"
-                      >
-                        #{tag}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
               </section>
             )}
 

@@ -5,7 +5,6 @@ import { useUpdateRecipe } from '../../../api/queries'
 import type { Recipe } from '../../../api/types'
 import { describeError } from '../../../lib/errors'
 import {
-  DIFFICULTIES,
   LIMITS,
   isDraftDirty,
   serverErrorsToDraft,
@@ -20,9 +19,9 @@ import { useSession } from '../../../session/context'
 import { ConfirmDialog } from '../../ConfirmDialog'
 import { UnsavedChangesGuard } from '../../UnsavedChangesGuard'
 import { Alert } from '../../ui'
-import { SelectField, TextArea, TextInput } from './fields'
+import { TextArea, TextInput } from './fields'
 import { fieldId, focusField } from './formUtils'
-import { IngredientsEditor, StepsEditor, TagsEditor, TipsEditor } from './ListEditors'
+import { IngredientsEditor, StepsEditor, TipsEditor } from './ListEditors'
 
 /** Texto do resumo de erros para cada chave (a ordem segue a do formulário). */
 function errorLabel(key: string, draft: RecipeDraft): string {
@@ -298,7 +297,7 @@ export function RecipeEditor({ recipe, restored = null, onClose }: RecipeEditorP
             hint={`${charCount(draft.summary.trim())} de ${LIMITS.summary} caracteres.`}
             className="max-w-3xl"
           />
-          <div className="grid max-w-3xl gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid max-w-3xl gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <TextInput
               fieldKey="servings"
               label="Rendimento"
@@ -308,7 +307,6 @@ export function RecipeEditor({ recipe, restored = null, onClose }: RecipeEditorP
               placeholder="6 porções"
               hint="Com um número, dá para ajustar as porções."
               autoComplete="off"
-              className="sm:col-span-2 lg:col-span-1"
             />
             <TextInput
               fieldKey="prepTime"
@@ -328,20 +326,6 @@ export function RecipeEditor({ recipe, restored = null, onClose }: RecipeEditorP
               inputMode="numeric"
               autoComplete="off"
             />
-            <SelectField
-              fieldKey="difficulty"
-              label="Dificuldade"
-              value={draft.difficulty}
-              error={errors.difficulty}
-              onChange={(e) => change({ difficulty: e.target.value as RecipeDraft['difficulty'] })}
-            >
-              <option value="">Não informada</option>
-              {DIFFICULTIES.map((difficulty) => (
-                <option key={difficulty} value={difficulty}>
-                  {difficulty[0].toUpperCase() + difficulty.slice(1)}
-                </option>
-              ))}
-            </SelectField>
           </div>
         </section>
 
@@ -368,15 +352,6 @@ export function RecipeEditor({ recipe, restored = null, onClose }: RecipeEditorP
             items={draft.tips}
             errors={errors}
             onChange={(tips) => change({ tips })}
-            announce={announce}
-          />
-        </Section>
-
-        <Section title="Tags" id="editar-tags">
-          <TagsEditor
-            tags={draft.tags}
-            errors={errors}
-            onChange={(tags) => change({ tags })}
             announce={announce}
           />
         </Section>
