@@ -65,7 +65,9 @@ class RecipeDetailScreen extends ConsumerWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(recipeState.value?.title ?? 'Receita', overflow: TextOverflow.ellipsis),
+        // O título completo da receita aparece no corpo da tela (abaixo), não aqui: a barra
+        // tem altura fixa e cortava nomes longos no meio ("Arroz de …").
+        title: const Text('Receita'),
         actions: recipeState.value == null
             ? null
             : [
@@ -123,20 +125,12 @@ class RecipeDetailScreen extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              Text(recipe.title, style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 8),
               if (recipe.summary.isNotEmpty) ...[
                 Text(recipe.summary, style: Theme.of(context).textTheme.bodyLarge),
                 const SizedBox(height: 12),
               ],
-              _RatingStars(
-                rating: recipe.rating,
-                onChanged: (value) async {
-                  try {
-                    await ref.read(recipeDetailProvider(recipeId).notifier).setRating(value);
-                  } on ApiException catch (e) {
-                    if (context.mounted) _showError(context, e);
-                  }
-                },
-              ),
               TimeFactsHeader(recipe: recipe),
               const SizedBox(height: 16),
               Text('Ingredientes', style: Theme.of(context).textTheme.titleLarge),
@@ -163,27 +157,6 @@ class RecipeDetailScreen extends ConsumerWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-class _RatingStars extends StatelessWidget {
-  final int? rating;
-  final ValueChanged<int?> onChanged;
-
-  const _RatingStars({required this.rating, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: List.generate(5, (i) {
-        final value = i + 1;
-        final filled = rating != null && value <= rating!;
-        return IconButton(
-          icon: Icon(filled ? Icons.star : Icons.star_border, color: Colors.amber),
-          onPressed: () => onChanged(rating == value ? null : value),
-        );
-      }),
     );
   }
 }

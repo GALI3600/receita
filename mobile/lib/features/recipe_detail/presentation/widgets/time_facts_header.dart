@@ -9,9 +9,8 @@ String _formatMinutes(int minutes) {
   return rest == 0 ? '${hours}h' : '${hours}h${rest}min';
 }
 
-/// Fatos da receita (porções/preparo/forno/total/dificuldade) — espelha a seção de
-/// `TimeFacts` em `frontend/src/pages/RecipePage.tsx`, que também é o que aparece na
-/// impressão.
+/// Fatos da receita (porções/preparo/forno/total) — espelha a seção de `TimeFacts` em
+/// `frontend/src/pages/RecipePage.tsx`, que também é o que aparece na impressão.
 class TimeFactsHeader extends StatelessWidget {
   final Recipe recipe;
 
@@ -28,7 +27,6 @@ class TimeFactsHeader extends StatelessWidget {
     if (recipe.prepTimeMin != null && recipe.cookTimeMin != null) {
       facts.add(('Total', _formatMinutes(recipe.prepTimeMin! + recipe.cookTimeMin!)));
     }
-    if (recipe.difficulty != null) facts.add(('Dificuldade', recipe.difficulty!));
 
     if (facts.isEmpty) return const SizedBox.shrink();
 
