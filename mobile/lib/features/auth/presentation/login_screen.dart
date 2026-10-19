@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../widgets/error_banner.dart';
+import '../../../widgets/password_field.dart';
 import '../application/auth_providers.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -80,10 +81,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       (value == null || value.trim().isEmpty) ? 'Informe o e-mail' : null,
                 ),
                 const SizedBox(height: 12),
-                TextFormField(
+                PasswordField(
                   controller: _passwordController,
-                  decoration: const InputDecoration(labelText: 'Senha'),
-                  obscureText: true,
+                  label: 'Senha',
                   autofillHints: const [AutofillHints.password],
                   validator: (value) =>
                       (value == null || value.isEmpty) ? 'Informe a senha' : null,

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../api/api_exception.dart';
 import '../../../providers/core_providers.dart';
 import '../../../widgets/error_banner.dart';
+import '../../../widgets/password_field.dart';
 
 class RegisterScreen extends ConsumerStatefulWidget {
   const RegisterScreen({super.key});
@@ -107,10 +108,9 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                       (value == null || value.trim().isEmpty) ? 'Informe o e-mail' : null,
                 ),
                 const SizedBox(height: 12),
-                TextFormField(
+                PasswordField(
                   controller: _passwordController,
-                  decoration: const InputDecoration(labelText: 'Senha (mín. 8 caracteres)'),
-                  obscureText: true,
+                  label: 'Senha (mín. 8 caracteres)',
                   validator: (value) => (value == null || value.length < 8)
                       ? 'A senha precisa ter pelo menos 8 caracteres'
                       : null,

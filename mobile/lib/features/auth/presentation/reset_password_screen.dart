@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../../api/api_exception.dart';
 import '../../../providers/core_providers.dart';
 import '../../../widgets/error_banner.dart';
+import '../../../widgets/password_field.dart';
 
 /// Mesma ressalva de `VerifyEmailScreen`: sem deep link ainda, o token do e-mail é
 /// colado manualmente.
@@ -94,10 +95,9 @@ class _ResetPasswordScreenState extends ConsumerState<ResetPasswordScreen> {
                       (value == null || value.trim().isEmpty) ? 'Informe o código' : null,
                 ),
                 const SizedBox(height: 12),
-                TextFormField(
+                PasswordField(
                   controller: _passwordController,
-                  decoration: const InputDecoration(labelText: 'Nova senha (mín. 8 caracteres)'),
-                  obscureText: true,
+                  label: 'Nova senha (mín. 8 caracteres)',
                   validator: (value) => (value == null || value.length < 8)
                       ? 'A senha precisa ter pelo menos 8 caracteres'
                       : null,
