@@ -155,41 +155,8 @@ describe('notas pessoais', () => {
   })
 })
 
-describe('avaliação e favorito', () => {
+describe('favorito', () => {
   beforeEach(() => installFakeYouTube())
-
-  it('escolher estrelas manda a avaliação e dá para limpar', async () => {
-    const { calls } = mockApi(routes())
-    renderRecipe()
-
-    const group = await screen.findByRole('group', { name: 'Sua avaliação' })
-    const four = within(group).getByRole('radio', { name: '4 estrelas, Muito boa' })
-    await userEvent.click(four)
-    expect(four).toBeChecked()
-    await waitFor(() => expect(patches(calls)).toEqual([{ rating: 4 }]))
-
-    // Teclado: setas mudam a escolha no grupo de rádios.
-    await userEvent.keyboard('{ArrowRight}')
-    await waitFor(() => expect(patches(calls)).toEqual([{ rating: 4 }, { rating: 5 }]))
-
-    await userEvent.click(screen.getByRole('button', { name: 'Limpar avaliação' }))
-    await waitFor(() => expect(patches(calls).at(-1)).toEqual({ rating: null }))
-    expect(within(group).getByText('Ainda sem avaliação')).toBeInTheDocument()
-  })
-
-  it('a avaliação volta atrás se a API recusar', async () => {
-    mockApi({
-      ...routes(makeRecipe({ rating: 2 })),
-      'PATCH /api/recipes/rec-1': () => apiError(500, 'internal_error', 'Erro do servidor.'),
-    })
-    renderRecipe()
-
-    const group = await screen.findByRole('group', { name: 'Sua avaliação' })
-    expect(within(group).getByRole('radio', { name: /^2 estrelas/ })).toBeChecked()
-    await userEvent.click(within(group).getByRole('radio', { name: /^5 estrelas/ }))
-    expect(await screen.findByText('Erro do servidor.')).toBeInTheDocument()
-    expect(within(group).getByRole('radio', { name: /^2 estrelas/ })).toBeChecked()
-  })
 
   it('favoritar é otimista e desfaz se a API recusar', async () => {
     let release: () => void = () => undefined

@@ -129,7 +129,7 @@ export function IngredientsEditor({
                     onRemove={() => remove(index)}
                   />
                 </div>
-                <div className="clear-both grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-[6rem_9rem_minmax(0,1fr)]">
+                <div className="clear-both grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-[8rem_12rem_minmax(0,1fr)]">
                   <TextInput
                     compact
                     fieldKey={k('quantity')}

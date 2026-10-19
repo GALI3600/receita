@@ -43,7 +43,6 @@ const baseRoutes = {
   'GET /api/auth/me': () => json(200, makeMe()),
   'GET /api/recipes/rec-1': () => json(200, makeRecipe()),
   'GET /api/recipes': () => json(200, { items: [], next_cursor: null }),
-  'GET /api/recipes/tags': () => json(200, { tags: [] }),
 }
 
 async function openEditor() {
@@ -54,7 +53,7 @@ async function openEditor() {
 describe('edição da receita', () => {
   beforeEach(() => installFakeYouTube())
 
-  it('edita campos, ingredientes, passos e tags e salva com PATCH', async () => {
+  it('edita campos, ingredientes, passos e dicas e salva com PATCH', async () => {
     const { calls } = mockApi({ ...baseRoutes, 'PATCH /api/recipes/rec-1': patchEcho })
     renderRecipe()
     await openEditor()
@@ -65,7 +64,6 @@ describe('edição da receita', () => {
     await userEvent.type(title, 'Bolo da vovó')
     await userEvent.clear(screen.getByLabelText('Preparo (min)'))
     await userEvent.type(screen.getByLabelText('Preparo (min)'), '25')
-    await userEvent.selectOptions(screen.getByLabelText('Dificuldade'), 'Média')
 
     // Novo ingrediente (herda o grupo do último) e remoção do "sal".
     await userEvent.click(screen.getByRole('button', { name: 'Adicionar ingrediente' }))
@@ -83,12 +81,9 @@ describe('edição da receita', () => {
     await userEvent.clear(within(passo1).getByLabelText('Tempo no vídeo'))
     await userEvent.type(within(passo1).getByLabelText('Tempo no vídeo'), '0:30')
 
-    // Dica nova e tags.
+    // Dica nova.
     await userEvent.click(screen.getByRole('button', { name: 'Adicionar dica' }))
     await userEvent.type(screen.getByLabelText('Dica 2'), 'Use cenouras bem laranjas.')
-    await userEvent.click(screen.getByRole('button', { name: 'Remover a tag sobremesa' }))
-    await userEvent.type(screen.getByLabelText('Nova tag'), '#Festa{Enter}')
-    expect(screen.getByRole('list', { name: 'Tags da receita' })).toHaveTextContent('#festa')
 
     await userEvent.click(screen.getByRole('button', { name: 'Salvar alterações' }))
 
@@ -103,10 +98,12 @@ describe('edição da receita', () => {
       title: 'Bolo da vovó',
       prep_time_min: 25,
       cook_time_min: 40,
-      difficulty: 'média',
+      // Dificuldade e tags não têm mais campo no editor; o rascunho reenvia os valores
+      // originais da receita (fixture makeRecipe) sem mudança.
+      difficulty: 'fácil',
       servings: '12 fatias',
       tips: ['Teste o fermento antes.', 'Use cenouras bem laranjas.'],
-      tags: ['bolo', 'festa'],
+      tags: ['bolo', 'sobremesa'],
     })
     expect(body.ingredients?.map((item) => item.name)).toEqual([
       'farinha de trigo',
