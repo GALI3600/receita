@@ -44,10 +44,20 @@ class _BookScreenState extends ConsumerState<BookScreen> {
   }
 
   void _onSearchChanged(String value) {
+    // Reconstrói na hora para o botão de limpar (×) aparecer/desaparecer junto da digitação,
+    // sem esperar o debounce do filtro em si.
+    setState(() {});
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 400), () {
-      setState(() => _filters = _filters.copyWith(q: value.trim().isEmpty ? null : value.trim()));
+      final trimmed = value.trim();
+      setState(() => _filters = _filters.copyWith(q: trimmed, clearQuery: trimmed.isEmpty));
     });
+  }
+
+  void _clearSearch() {
+    _debounce?.cancel();
+    _searchController.clear();
+    setState(() => _filters = _filters.copyWith(clearQuery: true));
   }
 
   void _toggleFavoriteFilter() {
@@ -58,14 +68,9 @@ class _BookScreenState extends ConsumerState<BookScreen> {
     });
   }
 
-  void _setTagFilter(String? tag) {
-    setState(() => _filters = RecipeListFilters(q: _filters.q, tag: tag, favorite: _filters.favorite));
-  }
-
   @override
   Widget build(BuildContext context) {
     final listState = ref.watch(recipeListProvider(_filters));
-    final tagsState = ref.watch(recipeTagsProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -90,42 +95,31 @@ class _BookScreenState extends ConsumerState<BookScreen> {
             child: TextField(
               controller: _searchController,
               onChanged: _onSearchChanged,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 hintText: 'Buscar receitas…',
-                prefixIcon: Icon(Icons.search),
-                border: OutlineInputBorder(),
+                prefixIcon: const Icon(Icons.search),
+                border: const OutlineInputBorder(),
                 isDense: true,
+                suffixIcon: _searchController.text.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.clear),
+                        tooltip: 'Limpar busca',
+                        onPressed: _clearSearch,
+                      ),
               ),
             ),
           ),
-          SizedBox(
-            height: 40,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              children: [
-                FilterChip(
-                  label: const Text('Favoritas'),
-                  avatar: const Icon(Icons.favorite, size: 16),
-                  selected: _filters.favorite == true,
-                  onSelected: (_) => _toggleFavoriteFilter(),
-                ),
-                const SizedBox(width: 8),
-                ...tagsState.maybeWhen(
-                  data: (tags) => tags.tags.map((tag) {
-                    final selected = _filters.tag == tag.name;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: FilterChip(
-                        label: Text('${tag.name} (${tag.count})'),
-                        selected: selected,
-                        onSelected: (_) => _setTagFilter(selected ? null : tag.name),
-                      ),
-                    );
-                  }),
-                  orElse: () => const Iterable<Widget>.empty(),
-                ),
-              ],
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: FilterChip(
+                label: const Text('Favoritas'),
+                avatar: const Icon(Icons.favorite, size: 16),
+                selected: _filters.favorite == true,
+                onSelected: (_) => _toggleFavoriteFilter(),
+              ),
             ),
           ),
           const SizedBox(height: 8),

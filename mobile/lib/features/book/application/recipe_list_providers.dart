@@ -14,9 +14,18 @@ class RecipeListFilters {
 
   const RecipeListFilters({this.q, this.tag, this.favorite});
 
-  RecipeListFilters copyWith({String? q, String? tag, bool? favorite, bool clearFavorite = false}) {
+  /// `clearQuery`/`clearFavorite` existem porque `q: null`/`favorite: null` nos parâmetros
+  /// nomeados não dá para distinguir de "não mudar este campo" (o padrão `?? this.x` trataria
+  /// os dois do mesmo jeito) — sem essa flag, limpar a busca não teria efeito nenhum.
+  RecipeListFilters copyWith({
+    String? q,
+    String? tag,
+    bool? favorite,
+    bool clearQuery = false,
+    bool clearFavorite = false,
+  }) {
     return RecipeListFilters(
-      q: q ?? this.q,
+      q: clearQuery ? null : (q ?? this.q),
       tag: tag ?? this.tag,
       favorite: clearFavorite ? null : (favorite ?? this.favorite),
     );

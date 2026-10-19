@@ -61,14 +61,6 @@ class RecipeCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ],
-                    if (recipe.tags.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        children: recipe.tags.take(3).map((tag) => _TagChip(tag: tag)).toList(),
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -85,21 +77,6 @@ class RecipeCard extends StatelessWidget {
       height: 88,
       color: Colors.black12,
       child: const Icon(Icons.menu_book, color: Colors.black38),
-    );
-  }
-}
-
-class _TagChip extends StatelessWidget {
-  final String tag;
-  const _TagChip({required this.tag});
-
-  @override
-  Widget build(BuildContext context) {
-    return Chip(
-      label: Text(tag, style: const TextStyle(fontSize: 11)),
-      visualDensity: VisualDensity.compact,
-      padding: EdgeInsets.zero,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
   }
 }

@@ -1,4 +1,5 @@
 import 'package:app/api/api_exception.dart';
+import 'package:app/features/book/application/recipe_list_providers.dart';
 import 'package:app/models/import_out.dart';
 import 'package:app/models/recipe.dart';
 import 'package:app/models/recipe_update.dart';
@@ -6,6 +7,21 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('RecipeListFilters.copyWith', () {
+    test('clearQuery actually clears q, instead of keeping the old value', () {
+      const filters = RecipeListFilters(q: 'bolo');
+      final cleared = filters.copyWith(clearQuery: true);
+      expect(cleared.q, isNull);
+    });
+
+    test('clearFavorite clears favorite without touching q', () {
+      const filters = RecipeListFilters(q: 'bolo', favorite: true);
+      final cleared = filters.copyWith(clearFavorite: true);
+      expect(cleared.favorite, isNull);
+      expect(cleared.q, 'bolo');
+    });
+  });
+
   group('Recipe.fromJson', () {
     test('parses a full recipe payload matching RecipeOut', () {
       final json = {
